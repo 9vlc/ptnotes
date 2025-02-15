@@ -15,7 +15,7 @@ cc vbios_vfct_file.c
 ./a.out vbios.dat
 ```
 
-you this should retrieve you a vbios file.
+this should retrieve you a vbios file.
 
 *if you are using a dedicated gpu, please note that
 the output will be lacking a gop / csm video driver*
