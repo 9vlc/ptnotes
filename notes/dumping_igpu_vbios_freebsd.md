@@ -1,4 +1,7 @@
-# dumping amd igpu vbios under FreeBSD
+# dumping amd (i)gpu vbios under FreeBSD
+
+*if you are using a dedicated gpu, please note that
+the output may be lacking the builtin gop driver*
 
 - install the `acpica-tools` package
 - get `vbios_vfct_file.c` from this repo
@@ -16,6 +19,3 @@ cc vbios_vfct_file.c
 ```
 
 this should retrieve you a vbios file.
-
-*if you are using a dedicated gpu, please note that
-the output will be lacking a gop / csm video driver*
