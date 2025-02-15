@@ -1,6 +1,7 @@
 # dumping AmdGopDriver
 
-1. building UEFIExtract
+## building UEFIExtract
+
 - aquire the source code of UEFITool from https://github.com/LongSoft/UEFITool
 - install `meson`, `ninja` and QT6 development libraries
 - `meson setup build && cd build && ninja` in the UEFITool directory
@@ -17,7 +18,8 @@ ninja
 this will build UEFIExtract, UEFIFind and UEFITool.
 copy the built UEFIExtract executable to something like your home directory
 
-2. getting your bios
+## getting your bios
+
 - find your motherboard model
 - search for a bios download on the manufacturer's website
 - download it
@@ -26,7 +28,8 @@ make sure it's a raw file sized at a round number like 8, 16 or 32 megabytes
 
 there may be a windows installer and something like EZFLASH installer, chose the EZFLASH one.
 
-4. extracting AmdGopDriver.efi
+## extracting AmdGopDriver.efi
+
 - get `gopextract.sh` from this repo
 - create a directory and put `gopextract.sh`, `UEFIExtract` and your BIOS inside
 - chmod +x `gopextract.sh` and `UEFIExtract`
@@ -34,9 +37,10 @@ there may be a windows installer and something like EZFLASH installer, chose the
 - `cp "$(find ext/OUTPUT -name '*image section*')"/body.bin ./AmdGopDriver`
 - `file AmdGopDriver`
 - now, if the output of `file` is "TE image" or "data", rename AmdGopDriver to AmdGopDriver.te. if it is PE32, rename it to AmdGopDriver.efi
-- if you got a TE image, go to 4.1. if you got pe32, skip to 5.
+- if you got a TE image, go to `converting TE to EFI` if you got pe32, skip to `converting the efi to a pci option rom`.
 
-4.1. converting TE to EFI
+### converting TE to EFI
+
 we are going to do this right in the directory with AmdGopDriver.te
 - compile TE2PE:
 ```sh
@@ -48,8 +52,9 @@ cc TE2PE/TE2PE.c -o TE2PE.elf
 ./TE2PE.elf AmdGopDriver.te AmdGopDriver.efi
 ```
 
-5. converting the efi to a pci option rom
-- install `gcc`, `gmake`, `python3` and `nasm` *(python3 and nasm might not be needed)*
+## converting the efi to a pci option rom
+
+- install `gcc`, `gmake`, `python3` and `nasm` *(nasm might not be needed)*
 - download edk2 sources with git: `git clone --recurse-submodules --depth=1 https://github.com/tianocore/edk2`
 - build the BaseTools:
 ```sh
