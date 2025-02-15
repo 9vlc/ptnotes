@@ -1,0 +1,17 @@
+move the directory to inspect to your current path
+$ mv ~/Desktop/coolbins ./coolbins
+
+run gen_ftlists.sh on the dir
+$ scripts/gen_ftlists.sh coolbins
+
+find a type of files you would like to extract data from
+for example "data"
+run gen_bwlists.sh on the file type in the new "out" directory
+$ scripts/gen_bwlists.sh out/data
+
+run ext_bwlists.sh on out/data.bwlists to extract them now
+$ ext_bwlists.sh out/data.bwlists
+
+we now have out.ext with all of our extracted files
+
+if you want, modify and run cleanup.sh on out.ext to clean unneeded subtypes of files
