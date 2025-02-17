@@ -15,7 +15,7 @@ sudo /usr/local/bin/acpidump -b
 
 cp ~/Downloads/vbios_vfct_file.c
 cc vbios_vfct_file.c
-./a.out vbios.dat
+./a.out vfct.dat
 ```
 
 this should retrieve you a vbios file.
