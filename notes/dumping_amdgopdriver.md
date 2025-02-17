@@ -3,7 +3,7 @@
 ## building UEFIExtract
 
 - aquire the source code of UEFITool from https://github.com/LongSoft/UEFITool
-- install `meson`, `ninja` and QT6 development libraries
+- install `meson` and `ninja`
 - `meson setup build && cd build && ninja` in the UEFITool directory
 
 as shell:
@@ -54,7 +54,7 @@ cc TE2PE/TE2PE.c -o TE2PE.elf
 
 ## converting the efi to a pci option rom
 
-- install `gcc`, `gmake`, `python3` and `nasm` *(nasm might not be needed)*
+- install `gcc`, `gmake` and `python`
 - download edk2 sources with git: `git clone --recurse-submodules --depth=1 https://github.com/tianocore/edk2`
 - build the BaseTools:
 ```sh
