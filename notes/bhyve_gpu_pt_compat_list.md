@@ -15,8 +15,27 @@ Late driver loading:
 - Linux: works
 - FreeBSD: works
 
+Notes:
+- Use https://github.com/9vlc/ptnotes/blob/main/progs/dump_intel_bios.c to extract motherboard BIOS to then use its gop drivers for early loading
+
 ## Intel ARC dGPU
 Not tested.
+
+# Nvidia
+
+ppt binding: works
+
+Early driver loading (requires a trimmed vBIOS):
+- EDK2: works
+- Windows: works
+- Linux: doesn't work
+- FreeBSD: not tested
+
+Late driver loading:
+- Nothing works
+
+Notes:
+- Use https://github.com/9vlc/ptnotes/tree/main/progs/trim_nvidia_vbios to trim the vbios for it to load properly
 
 # AMD
 ## AMD iGPU
@@ -29,13 +48,12 @@ Early driver loading:
 - Linux: works
 - FreeBSD: not tested (most likely works)
 
-* Note: Needs vbios extracted from ACPI tables & AmdGopDriver.efi converted to a PCI OpRom with EDK2 EfiRom
-* Note: Suffers from reset bug, improper VM shutdown breaks passthrough / locks up host machine
+Notes:
+- Needs vbios extracted from ACPI tables & AmdGopDriver.efi converted to a PCI OpRom with EDK2 EfiRom
+- Note: Suffers from reset bug, improper VM shutdown breaks passthrough / locks up host machine
 
 Late driver loading:
-- Windows: doesn't work
-- Linux: doesn't work
-- FreeBSD: doesn't work
+- Nothing works
 
 ## AMD dGPU
 ### RX 4XX - 6XXX
@@ -53,7 +71,8 @@ Late driver loading (blank/garbage vbios):
 - Linux: doesn't work
 - FreeBSD: not tested
 
-* Note: Suffers from reset bug, improper VM shutdown breaks passthrough / locks up host machine
+Notes:
+- Note: Suffers from reset bug, improper VM shutdown breaks passthrough / locks up host machine
 
 ### RX 7XXX
 
@@ -67,6 +86,7 @@ Late driver loading (blank/garbage vbios):
 - Linux: works (??????)
 - FreeBSD: sometimes, on a good day
 
-* Note: HEAVILY suffers from reset bug, ANY VM shutdown requires to hard reboot the host machine (passthrough breaks, locks up on attempted shutdown)
-* Note: https://github.com/inga-lovinde/RadeonResetBugFix help a bit with host shutdown on Windows guests, still reboot the guest on every vm shutdown
-* Note: RadeonResetBugFix causes VM to bluescreen / bhyve to crash on install, works on next boot
+Notes:
+- Note: HEAVILY suffers from reset bug, ANY VM shutdown requires to hard reboot the host machine (passthrough breaks, locks up on attempted shutdown)
+- Note: https://github.com/inga-lovinde/RadeonResetBugFix help a bit with host shutdown on Windows guests, still reboot the guest on every vm shutdown
+- Note: RadeonResetBugFix causes VM to bluescreen / bhyve to crash on install, works on next boot
