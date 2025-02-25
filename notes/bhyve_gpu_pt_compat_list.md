@@ -158,7 +158,7 @@ passing AmdGopDriver doesn't work too, we probably need to compile custom EDK2 w
 
 #### AMD dGPU (>=RX 7XXX) late driver loading
 Requirements:
-- Pass an empty / garbage 1-2 MB file as the vBIOS for the GPU VGA device.
+- Either [extract the vBIOS the same way as AMD iGPU](https://github.com/9vlc/ptnotes/blob/main/notes/dumping_igpu_vbios_freebsd.md), either [download one](https://www.techpowerup.com/vgabios/), either use an empty / garbage 1-2 MB file as the vBIOS for the GPU VGA device OpRom.
 
 bhyve experience:
 - Windows: works
