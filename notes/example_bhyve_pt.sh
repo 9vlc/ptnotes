@@ -19,7 +19,7 @@ bhyve \
 	`: ` \
 	-s 0,amd_hostbridge \
 	-s 31,lpc \
-	`: lpc stuff`
+	`: lpc stuff` \
 	-o pci.0.31.0.pcireg.vendor=host \
 	-o pci.0.31.0.pcireg.device=host \
 	-o pci.0.31.0.pcireg.subvendor=host \
