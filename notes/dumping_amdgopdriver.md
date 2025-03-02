@@ -1,5 +1,7 @@
 # dumping AmdGopDriver
 
+# WARNING: These instructions are currently outdated, the extracted AmdGopDriver file appears to be the wrong one. An automatic extraction script is already on the way.
+
 ## building UEFIExtract
 
 - aquire the source code of UEFITool from https://github.com/LongSoft/UEFITool
