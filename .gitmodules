@@ -1,0 +1,3 @@
+[submodule "roms/vendor/amd/firmware_binaries"]
+	path = roms/vendor/amd/firmware_binaries
+	url = https://github.com/amd/firmware_binaries
