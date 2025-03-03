@@ -2,7 +2,7 @@
 set -e
 
 nproc=5
-uefiextract="$HOME/Desktop/util/UEFIExtract"
+uefiextract="$PWD/UEFIExtract"
 
 if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ]; then
 	echo "usage: $0 [file.rom] [output dir] {expression}"

@@ -2,7 +2,7 @@
 set -e
 
 nproc="$(nproc)"
-uefiextract="$HOME/Desktop/util/UEFIExtract"
+uefiextract="$PWD/UEFIExtract"
 # format: hex data to find::output name::output extension
 signatures="41 00 4D 00 44 00 20 00 47 00 4F 00 50 00 20 00 58 00 36 00 34::AmdGopDriver::efi"
 
