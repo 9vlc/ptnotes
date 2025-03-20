@@ -23,7 +23,7 @@ copy the built UEFIExtract executable to something like your home directory
 either download it from your motherboard manufacturers website either use dump your bios using one of these four methods:
 1. compile `dump-bios.c` from this repo's old progs directory, run it with the following args: `./dump 32m 4080m bios.bin`
 2. `camdd -m 32m -i file=/dev/mem,offset=4080m -o file=bios.bin`
-3. `dd if=/dev/mem of=bios.bin bs=1m count=32 skip=4080`
+3. `dd if=/dev/mem of=bios.bin bs=1M count=32 skip=4080`
 4. install flashrom and do `flashrom -p internal -r bios.bin`
 
 notes:
