@@ -1,0 +1,6 @@
+#!/bin/sh
+
+if [ -e trim.c ] && [ -e trim.h ] && [ ! -e trim.elf ]; then
+  cc -o trim.elf -I. trim.c
+  echo "compiled as trim.elf"
+fi
