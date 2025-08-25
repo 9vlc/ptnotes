@@ -114,7 +114,6 @@ for current_entry in $(seq $map_entries); do
 		echo "WARNING WARNING WARNING"
 		echo "Offset at position $current_entry larger than next offset"
 		echo "Setting the end offset to the input file size"
-		echo "PLEASE. FIX. THE. MAP."
 		end_offset="$input_file_size"
 	fi
 

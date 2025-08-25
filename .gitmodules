@@ -1,3 +1,12 @@
-[submodule "roms/vendor/amd/firmware_binaries"]
-	path = roms/vendor/amd/firmware_binaries
+[submodule "roms/ext/amd"]
+	path = roms/ext/amd
 	url = https://github.com/amd/firmware_binaries
+	branch = main
+[submodule "roms/ext/intel-fsp"]
+	path = roms/ext/intel_fsp
+	url = https://github.com/intel/FSP
+	branch = master
+[submodule "roms/ext/intel_gpu_firmware"]
+	path = roms/ext/intel_gpu_firmware
+	url = https://github.com/intel-gpu/intel-gpu-firmware
+	branch = main
