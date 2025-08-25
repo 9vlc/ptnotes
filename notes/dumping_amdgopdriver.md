@@ -20,15 +20,15 @@ copy the built UEFIExtract executable to something like your home directory
 
 ## getting your bios
 
-either download it from your motherboard manufacturers website either use dump your bios using one of these four methods:
-1. compile `dump-bios.c` from this repo's old progs directory, run it with the following args: `./dump 32m 4080m bios.bin`
-2. `camdd -m 32m -i file=/dev/mem,offset=4080m -o file=bios.bin`
-3. `dd if=/dev/mem of=bios.bin bs=1M count=32 skip=4080`
-4. install flashrom and do `flashrom -p internal -r bios.bin`
+noting: I call UEFI Firmware a "BIOS" for the sake of convinience. Don't attack me over it, I know the difference.
+
+either download it from your motherboard manufacturers website either dump your bios using one of these methods:
+1. `dd if=/dev/mem of=bios.bin bs=1M count=32 skip=4080`
+2. `pkg install flashrom && flashrom -p internal -r bios.bin`
 
 notes:
 - you might need to replace 32(m) with 8 or 16 depending on your actual bios size.
-- if downloading: make sure it's a raw file sized at a round number like 8, 16 or 32 megabytes. there may be a windows installer and something like EZFLASH installer, chose the flash one as it's the raw file.
+- if downloading: make sure it's a raw file sized at a round number like 8, 16 or 32 megabytes. there may be a windows installer and something along the lines of "ezflash image" with an unknown extension that you download to a usb and choose in one of the menus of your firmware, get the ezflash image as it's a raw signed firmware blob.
 
 ## extracting AmdGopDriver.efi
 
@@ -39,7 +39,7 @@ notes:
 - `mv output/AmdGop* ./AmdGopDriver`
 - `file AmdGopDriver`
 - now, if the output of `file` is "TE image" or "data", rename AmdGopDriver to AmdGopDriver.te. if it is PE32, rename it to AmdGopDriver.efi
-- if you got a TE image, go to `converting TE to EFI`, if you got PE32, skip to `converting the efi to a pci option rom`.
+- if you got a TE image, go to the next section. if you got PE32, skip to `converting the efi to a pci option rom`.
 
 ### converting TE to EFI
 
@@ -61,10 +61,10 @@ cc TE2PE/TE2PE.c -o TE2PE.elf
 - build the BaseTools:
 ```sh
 cd edk2/BaseTools
-gmake -j$(nproc)
+gmake -j$(nproc) # just "make" if you're on Linux
 ```
 - copy over `edk2/BaseTools/Sources/C/bin/EfiRom` to the directory with AmdGopDriver.efi
 - go to that directory
 - `./EfiRom -f 0x1002 -i 0xffff -e AmdGopDriver.efi -o AmdGopDriver-OpRom.rom`
 
-congratulations, you got yourself a PCI option ROM of AmdGopDriver
+You can now use the `AmdGopDriver-OpRom.rom` file for passing through your iGPU!
