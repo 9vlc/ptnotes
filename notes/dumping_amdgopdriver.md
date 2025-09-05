@@ -32,7 +32,7 @@ notes:
 
 ## extracting AmdGopDriver.efi
 
-- get `extract-by-sig.sh` from this repo's scripts directory
+- get `extract-by-sig.sh` from this repo's scripts/ext directory
 - create a directory and put `extract-by-sig.sh`, `UEFIExtract` and your BIOS inside
 - chmod +x `extract-by-sig.sh` and `UEFIExtract`
 - `./extract-by-sig.sh bios.bin output`

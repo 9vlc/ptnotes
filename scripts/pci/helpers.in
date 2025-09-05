@@ -1,0 +1,281 @@
+#!sh
+# vim: noet
+
+#
+# useful helper functions.
+#
+
+#
+# print input with no formatting whatsoever
+# i made this because i got tired of constantly typing out printf '%s' "..."
+#
+_p()
+{
+	printf '%s' "$*"
+}
+
+#
+# turn input to lowercase
+#
+_lcase()
+{
+	if [ "$*" = - ]; then
+		dd conv=lcase 2>/dev/null
+	else
+		_p "$*" | dd conv=lcase 2>/dev/null
+	fi
+}
+
+#
+# turn input to uppercase
+#
+_ucase()
+{
+	if [ "$*" = - ]; then
+		dd conv=ucase 2>/dev/null
+	else
+		_p "$*" | dd conv=ucase 2>/dev/null
+	fi
+}
+
+#
+# logging and errors
+#
+_l()
+{
+	case "$1" in
+	w) # warning
+		shift 1
+		1>&2 printf 'warning: %s\n' "$@"
+	;;
+	e) # error, exit after the message
+		shift 1
+		1>&2 printf 'error: %s\n' "$@"
+		exit 1
+	;;
+	x) # error, set err=1
+		shift 1
+		1>&2 printf 'error: %s\n' "$@"
+		err=1
+	;;
+	i|*) # info
+		shift 1
+		1>&2 printf 'info: %s\n' "$@"
+	;;
+	esac
+}
+
+#
+# return 0 if X/Y/Z syntax
+#
+_d_is_ppt_syntax()
+{
+	_p "$1" | grep -qE '^[0-9]+/[0-9]+/[0-9]+$'
+}
+
+#
+# return 0 if pci0:X:Y:Z syntax
+#
+_d_is_pci_syntax()
+{
+	_p "$1" | grep -qE '^pci0:[0-9]+:[0-9]+:[0-9]+$'
+}
+
+#
+# convert ppt syntax (X/Y/Z) to pci (pci0:X:Y:Z)
+#
+_d_conv_syntax_pci()
+{
+	local device="$1"
+
+	if _d_is_pci_syntax "$device"; then
+		_p "$device"
+	elif ! _d_is_ppt_syntax "$device"; then
+		return 1
+	else
+		_p "$device" | awk -F/ 'BEGIN{RS=" "}{printf("pci0:%s:%s:%s",$1,$2,$3)}'
+	fi
+}
+
+#
+# convert pci syntax (pci0:X:Y:Z) to ppt (X/Y/Z)
+#
+_d_conv_syntax_ppt()
+{
+	local device="$1"
+
+	if _d_is_ppt_syntax "$device"; then
+		_p "$device"
+	elif ! _d_is_pci_syntax "$device"; then
+		return 1
+	else
+		_p "$device" | awk -F: 'BEGIN{RS=" "}{printf("%s/%s/%s",$2,$3,$4)}'
+	fi
+}
+
+#
+# return currently bound driver of the device
+#
+_d_get_driver()
+{
+	local device="$1"
+
+	pciconf="$(pciconf -l "$device")"
+	[ $? -ne 0 ] && return 1
+	_p "$pciconf" | awk -F@ '{gsub(/[0-9]+$/,"",$1);print$1}' 2>/dev/null
+}
+
+#
+# big logic for detaching devices
+#
+_d_detach()
+{
+	local device="$1"
+	local success=0
+
+	if [ "$(_d_get_driver "$device")" = none ]; then
+		_l w "device $device already detached"
+		return 0
+	fi
+
+	for attempt in $(seq 3); do
+		if ! devctl detach "$device" 2>/dev/null; then
+			_l i "device $device is busy, attempting a detach again in 3 seconds"
+			sleep 3
+		else
+			_l i "detached $device"
+			success=1
+			break
+		fi
+	done
+	
+	if [ "$success" -eq 0 ]; then
+		_l w "could not detach '$device', attempting a force detach!"
+		_l w "passthrough may not work, please add the device to loader's pptdevs!"
+		if ! devctl detach -f "$device"; then
+			_l e "could not detach '$device', refer to the error above"
+		fi
+	fi
+}
+
+#
+# return all pci device variables (range 0x0-0xfff) as a csv:
+# address,value
+#
+_d_save_conf()
+{
+	local device="$1"
+	local width="${2:-4}"
+	local range_start="${3:-0}"
+	local range_end="${4:-fff}"
+	
+	#
+	# format then truncate the range to nearest to width number
+	#
+	range_start="$((0x$(_p "$range_start" | _lcase -)))"
+	range_start="$((range_start / width * width))"
+	range_start="$(printf '%x' "$range_start")"
+	range_end="$((0x$(_p "$range_end" | _lcase -)))"
+	range_end="$((range_end / width * width))"
+	range_end="$(printf '%x' "$range_end")"
+
+	# 
+	# reading config address 0x0 seems to be the most sane way of checking if
+	# a pci device exists. pciconf -l returns 0 if you give it a non existing device
+	# with a valid syntax, for example
+	# pciconf -l pci0:999:123:123 returns 0 even though the device doesn't exist
+	#
+	if ! pciconf -r "$device" 0x0 >/dev/null 2>&1; then
+		1>&2 echo "error: device '$device' does not exist"
+		exit 1
+	fi
+
+	#
+	# range check
+	#
+	if ! _p "$range_start,$range_end" | grep -qE '^[0-9a-f]+,[0-9a-f]+$' ||
+		[ $((0x$range_start)) -gt $((0x$range_end)) ] ||
+		[ $((0x$range_end)) -ge 4096 ]; then
+		_l e "invalid range: '$range_start' -> '$range_end'"
+	fi
+
+	local extra_arg=""
+	case "$width" in
+		1) extra_arg=-b ;;
+		2) extra_arg=-h ;;
+		4) : ;;
+		*) _l e "invalid variable width: '$width'. possible widths: 1, 2, 4" ;;
+	esac
+
+	echo "# width $width"
+	pciconf $extra_arg -r "$device" 0x"$range_start":0x"$range_end" |
+		awk -v c=$((0x$range_start)) -v W=$width '
+		{ for(i = 1; i <= NF; i++) {
+				printf("%x,%s\n", c, $i)
+				c += W
+		} }'
+}
+
+#
+# take an address,value csv generated from our _d_save_conf function
+# and load the pci config variables to a specified pci device
+#
+# note 1: first validate the vars and only then do pciconf because
+#   if we don't, the pci device might die from invalid config
+#
+# note 2:
+#   please if you're loading vars in a script,
+#   UNLESS YOU KNOW WHAT YOU ARE DOING,
+#   CUT OFF ALL VARIABLES AFTER 0xff. IT MAY DAMAGE YOUR DEVICE.
+#   Everything after 0xff is vendor-specific variables which you
+#   should write to only if you explicitly know what each one of them does.
+#   Even writing the same value as it was before can cause serious
+#   damage to a device.
+#
+_d_load_conf()
+{
+	local device="$1"
+	
+	if ! pciconf -r "$device" 0x0 >/dev/null 2>&1; then
+		1>&2 echo "error: device '$device' does not exist"
+		exit 1
+	fi
+	
+	local vars="$(cat | _lcase -)"
+	local width="$(_p "$vars" | sed 's/^.* //;q')"
+
+	local extra_arg=""
+	case "$width" in
+		1) extra_arg=-b ;;
+		2) extra_arg=-h ;;
+		4) : ;;
+		*) _l e "invalid variable width: '$width'. possible widths: 1, 2, 4" ;;
+	esac
+	
+	#
+	# validate the variables
+	#
+	local valid_vars
+	if ! valid_vars="$(_p "$vars" | awk -v W=$width -F, '
+		/^[^#]/{
+			gsub(/[[:space:]]/, "", $0)
+			print $0
+			if(($0 !~ /^[0-9a-f]+,[0-9a-f]+$/) || (W*2 != length($2)))
+				exit(1)
+		}'
+	)"; then
+		_l e "invalid entry: '$(_p "$valid_vars" | sed -n '$p')'"
+	fi
+
+	#
+	# set
+	#
+	local var_addr
+	local var_value
+	for pair in $valid_vars; do
+		addr="${pair%%,*}"
+		value="${pair##*,}"
+		pciconf -w $extra_arg "$device" "0x$addr" "0x$value"
+	done
+}
+

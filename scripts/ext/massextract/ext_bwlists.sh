@@ -3,7 +3,7 @@
 set -e
 
 nproc=$(nproc)
-extract="$PWD/scripts/extract-binwalk.sh"
+extract="$PWD/scripts/ext/extract-binwalk.sh"
 
 if [ ! -d "$1" ]; then
 	echo "input directory does not exist"
