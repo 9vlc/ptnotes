@@ -19,11 +19,6 @@ fi
 err=0
 
 #
-# are we root?
-#
-[ "$USER" = root ] || _l e "must be root to run this"
-
-#
 # get the script directory
 #
 if script_dir="$(command -v "$0")"; then
@@ -36,6 +31,11 @@ fi
 # load in a bunch of functions
 #
 . "$script_dir"/helpers.in
+
+#
+# are we root?
+#
+[ "$USER" = root ] || _l e "must be root to run this"
 
 #
 # did the script even get devices provided? 
