@@ -1,13 +1,12 @@
-#!sh
-# vim: noet
+#!sh -not meant to be ran, bogus crunchbang for syntax highlighting.
+# vim: noet:sw=2:ts=2:
 
 #
 # useful helper functions.
 #
 
 #
-# print input with no formatting whatsoever
-# i made this because i got tired of constantly typing out printf '%s' "..."
+# print with no formatting
 #
 _p()
 {
@@ -46,21 +45,21 @@ _l()
 	case "$1" in
 	w) # warning
 		shift 1
-		1>&2 printf 'warning: %s\n' "$@"
+		>&2 printf 'warning: %s\n' "$@"
 	;;
 	e) # error, exit after the message
 		shift 1
-		1>&2 printf 'error: %s\n' "$@"
+		>&2 printf 'error: %s\n' "$@"
 		exit 1
 	;;
 	x) # error, set err=1
 		shift 1
-		1>&2 printf 'error: %s\n' "$@"
+		>&2 printf 'error: %s\n' "$@"
 		err=1
 	;;
 	i|*) # info
 		shift 1
-		1>&2 printf 'info: %s\n' "$@"
+		>&2 printf 'info: %s\n' "$@"
 	;;
 	esac
 }
@@ -186,7 +185,7 @@ _d_save_conf()
 	# pciconf -l pci0:999:123:123 returns 0 even though the device doesn't exist
 	#
 	if ! pciconf -r "$device" 0x0 >/dev/null 2>&1; then
-		1>&2 echo "error: device '$device' does not exist"
+		>&2 echo "error: device '$device' does not exist"
 		exit 1
 	fi
 
@@ -237,7 +236,7 @@ _d_load_conf()
 	local device="$1"
 	
 	if ! pciconf -r "$device" 0x0 >/dev/null 2>&1; then
-		1>&2 echo "error: device '$device' does not exist"
+		>&2 echo "error: device '$device' does not exist"
 		exit 1
 	fi
 	
