@@ -3,6 +3,8 @@
 # by 9vlc
 set -eu
 
+action="${1:-}"
+state_dir="${2:-}"
 devices="${pptdevs:-}"
 [ "${3:-}" ] && shift 2 && devices="$*"
 
@@ -25,7 +27,7 @@ fi
 #
 [ "$USER" = root ] || _l e "must be root to run this"
 
-if [ -z "${1:-}" ] || [ -z "${2:-}" ] || [ -z "$devices" ]; then
+if [ -z "$action" ] || [ -z "$state_dir" ] || [ -z "$devices" ]; then
 	>&2 echo "usage: state.sh save/load statedir [dev 1] [dev 2] ..."
 	>&2 echo "save and load the config space of a list of pci devices"
 	>&2 echo "note: variables above 0xff shall not be written to unless you know what you're doing"
@@ -35,10 +37,9 @@ if [ -z "${1:-}" ] || [ -z "${2:-}" ] || [ -z "$devices" ]; then
 	exit 1
 fi
 
-state_dir="${2:-}"
 [ -d "$state_dir" ] || mkdir -p "$state_dir" 
 
-case "${1:-}" in
+case "$action" in
 	s*)
 		for dev in $devices; do
 			var_file="$state_dir/$(printf '%s' "$dev" | tr / _)"
