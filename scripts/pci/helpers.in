@@ -164,10 +164,11 @@ _d_detach()
 _d_save_conf()
 {
 	local device="$1"
+	device="$(_d_conv_syntax_pci "$device")" || _l e "invalid device: $device"
 	local width="${2:-4}"
 	local range_start="${3:-0}"
 	local range_end="${4:-fff}"
-	
+
 	#
 	# format then truncate the range to nearest to width number
 	#
@@ -234,6 +235,7 @@ _d_save_conf()
 _d_load_conf()
 {
 	local device="$1"
+	device="$(_d_conv_syntax_pci "$device")" || _l e "invalid device: $device"
 	
 	if ! pciconf -r "$device" 0x0 >/dev/null 2>&1; then
 		>&2 echo "error: device '$device' does not exist"

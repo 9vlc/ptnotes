@@ -42,19 +42,19 @@ fi
 case "$action" in
 	s*)
 		for dev in $devices; do
-			var_file="$state_dir/$(printf '%s' "$dev" | tr / _)"
-
-			_d_save_conf "$(_d_conv_syntax_pci "$dev")" > "$var_file"
+			var_file="$state_dir/$(_p "$dev" | sed 's/[^a-z0-9]/_/g')"
+			vars="$(_d_save_conf "$dev")" || exit $?
+			_p "$vars" > "$var_file"
 		done
 	;;
 	l*)
 		[ -d "$state_dir" ] || _l e "no such state directory: $state_dir"
 		for dev in $devices; do
-			var_file="$state_dir/$(printf '%s' "$dev" | tr / _)"
+			var_file="$state_dir/$(_p "$dev" | sed 's/[^a-z0-9]/_/g')"
 			[ -f "$var_file" ] || _l w "missing device state file: $var_file"
-
+			
 			_l i "loading variables for $dev"
-			_d_load_conf "$(_d_conv_syntax_pci "$dev")" < "$var_file"
+			_d_load_conf "$dev" < "$var_file"
 		done
 	;;
 	*) echo "?" ; exit 1 ;;
