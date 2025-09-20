@@ -10,11 +10,8 @@ set -eu
 #   cpu that supports all virtualization stuff
 #
 
-if [ "${pptdevs:-}" ]; then
-	pptdevs="$pptdevs"
-else
-	pptdevs="${*:-}"
-fi
+pptdevs="${pptdevs:-}"
+[ "${1:-}" ] && pptdevs="$*"
 
 err=0
 
@@ -40,10 +37,12 @@ fi
 #
 # did the script even get devices provided? 
 #
-if [ -z "${pptdevs:-}" ]; then
-	>&2 printf 'usage: %s\n' "$0"
-	>&2 echo "this script takes a device list from a pptdevs env variable"
-	>&2 echo "or passed arguments and binds them to the ppt driver"
+if [ -z "$pptdevs" ]; then
+	>&2 echo "usage: bind.sh [dev 1] [dev 2] ..."
+	>&2 echo "bind a list of pci devices to pptdevs without rebooting"
+	>&2 echo
+	>&2 echo "this script takes a device list from a pptdevs env variable or passed arguments"
+	>&2 echo "note: argument devices are prioritized over environment"
 	exit 1
 fi
 
