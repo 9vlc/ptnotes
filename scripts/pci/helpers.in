@@ -207,7 +207,6 @@ _d_save_conf()
 		*) _l e "invalid variable width: '$width'. possible widths: 1, 2, 4" ;;
 	esac
 
-	echo "# width $width"
 	pciconf $extra_arg -r "$device" 0x"$range_start":0x"$range_end" |
 		awk -v c=$((0x$range_start)) -v W=$width '
 		{ for(i = 1; i <= NF; i++) {
@@ -243,7 +242,7 @@ _d_load_conf()
 	fi
 	
 	local vars="$(cat | _lcase -)"
-	local width="$(_p "$vars" | sed 's/^.* //;q')"
+	local width="$(_p "$vars" | awk -V, '/^[^#]/{print length($2)/2; exit}')"
 
 	local extra_arg=""
 	case "$width" in
