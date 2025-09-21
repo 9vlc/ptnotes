@@ -43,8 +43,7 @@ case "$action" in
 		for dev in $devices; do
 			var_file="$state_dir/$(_p "$dev" | sed 's/[^a-z0-9]/_/g')"
 			vars="$(_d_save_conf "$dev")" || exit $?
-			_p "$vars" > "$var_file"
-			echo >> "$var_file" # add a newline
+			_P "$vars" > "$var_file"
 		done
 	;;
 	l*)

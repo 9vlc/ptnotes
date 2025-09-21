@@ -6,12 +6,10 @@
 #
 
 #
-# print with no formatting
+# print
 #
-_p()
-{
-	printf '%s' "$*"
-}
+_p() { printf '%s' "$@"; }
+_P() { printf '%s\n' "$*"; }
 
 #
 # turn input to lowercase

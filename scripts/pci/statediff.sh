@@ -39,6 +39,6 @@ done
 for state in $states; do
 	if ! diff_output="$(diff "$state1_dir/$state" "$state2_dir/$state")"; then
 		_l i "== states $state differ =="
-		_p "$diff_output"
+		_P "$diff_output"
 	fi
 done
