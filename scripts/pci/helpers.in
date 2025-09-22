@@ -240,7 +240,7 @@ _d_load_conf()
 	fi
 	
 	local vars="$(cat | _lcase -)"
-	local width="$(_p "$vars" | awk -V, '/^[^#]/{print length($2)/2; exit}')"
+	local width="$(_p "$vars" | awk -F, '/^[^#]/{print length($2)/2; exit}')"
 
 	local extra_arg=""
 	case "$width" in

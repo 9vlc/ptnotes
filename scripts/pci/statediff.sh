@@ -6,8 +6,10 @@ state1_dir="${1:-}"
 state2_dir="${2:-}"
 
 if [ -z "$state1_dir" ] || [ -z "$state2_dir" ]; then
-	>&2 echo "usage: statediff.sh state1 state2"
-	>&2 echo "provide two state directories to see if any config space variables have changed."
+	>&2 cat << eol
+usage: statediff.sh state1 state2
+provide two state directories to see if any config space variables have changed.
+eol
 	exit 1
 fi
 
@@ -28,7 +30,7 @@ fi
 # find common devices between the two statedirs
 #
 states=""
-for state in $(ls "$state1_dir"); do
+for state in $(ls "$state1_dir" | sort -V); do
 	if [ -f "$state1_dir/$state" ] && [ -f "$state2_dir/$state" ]; then
 		states="$states $state"
 	else
@@ -38,7 +40,8 @@ done
 
 for state in $states; do
 	if ! diff_output="$(diff "$state1_dir/$state" "$state2_dir/$state")"; then
-		_l i "== states $state differ =="
+		_l i "states $state differ"
 		_P "$diff_output"
+		>&2 echo
 	fi
 done

@@ -38,11 +38,13 @@ fi
 # did the script even get devices provided? 
 #
 if [ -z "$pptdevs" ]; then
-	>&2 echo "usage: bind.sh [dev 1] [dev 2] ..."
-	>&2 echo "bind a list of pci devices to pptdevs without rebooting"
-	>&2 echo
-	>&2 echo "this script takes a device list from a pptdevs env variable or passed arguments"
-	>&2 echo "note: argument devices are prioritized over environment"
+	>&2 cat << eol
+usage: bind.sh [dev 1] [dev 2] ...
+bind a list of pci devices to pptdevs without rebooting
+
+this script takes a device list from a pptdevs env variable or passed arguments
+note: argument devices are prioritized over environment
+eol
 	exit 1
 fi
 
