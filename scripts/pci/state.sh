@@ -104,7 +104,6 @@ case "$action" in
 			[ -f "$var_file" ] || _l w "missing device state file: $var_file"
 			
 			if [ "$forked_load" = 1 ]; then
-				_l i "loading variables: "
 				if _P "$vars" | _d_load_conf "$dev"; then
 					_p "$dev "
 				fi &
@@ -113,6 +112,7 @@ case "$action" in
 				_P "$vars" | _d_load_conf "$dev"
 			fi
 		done; wait
+		>&2 echo
 	;;
 	*) echo "?" ; exit 1 ;;
 esac
