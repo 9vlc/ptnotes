@@ -74,10 +74,26 @@ fi
 [ -d "$state_dir" ] || mkdir -p "$state_dir" 
 
 #
+# need this
+#
+validate_devices()
+{
+	for dev in $1; do
+		if ! dev_pci="$(_d_conv_syntax_pci "$dev")"; then
+			_l e "invalid device: $dev"
+		elif ! pciconf -r "$dev_pci" 0x0 >/dev/null 2>&1; then
+			_l e "device '$dev' does not exist"
+		fi
+		_p "$dev "
+	done
+}
+
+#
 # logic
 #
 case "$action" in
 	s*)
+		devices="$(validate_devices "$devices")"
 		for dev in $devices; do
 			var_file="$state_dir/$(_p "$dev" | sed 's/[^a-z0-9]/_/g')"
 			vars="$(_d_save_conf "$dev" "$width")" || exit $?
@@ -86,6 +102,7 @@ case "$action" in
 	;;
 	l*)
 		[ -d "$state_dir" ] || _l e "no such state directory: $state_dir"
+		devices="$(validate_devices "$devices")"
 		for dev in $devices; do
 			var_file="$state_dir/$(_p "$dev" | sed 's/[^a-z0-9]/_/g')"
 			#

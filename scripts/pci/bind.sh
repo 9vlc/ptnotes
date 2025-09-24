@@ -89,7 +89,8 @@ done
 #
 # is vmm unloaded? if so, load it!
 #
-sysctl kern.consmute=1
+# uncomment if doing gpu pt
+# sysctl kern.consmute=1
 vmm_prev_loaded=1
 if ! kldstat -qn vmm; then
 	_l i "loading vmm.ko"

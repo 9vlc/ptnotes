@@ -184,8 +184,7 @@ _d_save_conf()
 	# pciconf -l pci0:999:123:123 returns 0 even though the device doesn't exist
 	#
 	if ! pciconf -r "$device" 0x0 >/dev/null 2>&1; then
-		>&2 echo "error: device '$device' does not exist"
-		exit 1
+		_l e "device '$device' does not exist"
 	fi
 
 	#
@@ -235,7 +234,7 @@ _d_load_conf()
 	device="$(_d_conv_syntax_pci "$device")" || _l e "invalid device: $device"
 	
 	if ! pciconf -r "$device" 0x0 >/dev/null 2>&1; then
-		>&2 echo "error: device '$device' does not exist"
+		_l e "device '$device' does not exist"
 		exit 1
 	fi
 	
