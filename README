@@ -1,2 +1,4 @@
+moved to codeberg: https://codeberg.org/9vlc/ptnotes
+
 the place where i leave notes about gpu passthrough, bios extraction, etc.
 scripts have only being maintained for freebsd, expect issues on gnu os-es.
