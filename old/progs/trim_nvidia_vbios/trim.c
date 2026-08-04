@@ -80,7 +80,8 @@ main(int argc, char *argv[])
 	input_file_bytes = fread(buffer, 1, input_size, input_file);
 	if (input_file_bytes != input_size)
 	{
-		fprintf(stderr, "%s: issue reading input: expected %ld bytes, got %zu bytes\n", progname, input_size, input_file_bytes);	fclose(input_file);
+		fprintf(stderr, "%s: issue reading input: expected %ld bytes, got %zu bytes\n", progname, input_size, input_file_bytes);
+		fclose(input_file);
 		free(buffer);
 		exit(1);
 	}
