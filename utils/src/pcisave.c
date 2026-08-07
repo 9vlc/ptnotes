@@ -29,37 +29,25 @@
  */
 
 /*
- * pcistates.c - Save and restore PCI config space states
+ * pcisave.c - Save and restore PCI config space states
  */
 
-#include <sys/types.h>
-#include <sys/ioctl.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
-#include <sys/pciio.h>
 
+#include <ctype.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <ctype.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
 
+#include <pci.h>
+
 /*
  * Macros
  */
-
-#if defined(DEBUG)
-#  define LOG(STR) fprintf(stderr, "Log @ %s:%d:%s: "STR"\n", \
-	__FILE__, __LINE__, __func__)
-#  define LOGV(FMT, ...) fprintf(stderr, "Log @ %s:%d:%s: "FMT"\n", \
-	__FILE__, __LINE__, __func__, __VA_ARGS__)
-#else
-#  define LOG(STR) (void)0
-#  define LOGV(FMT, ...) (void)0
-#endif
 
 #define CFG_SZ		(256)
 #define CFG_MASK_SZ	(CFG_SZ / 8 / 4)
@@ -69,18 +57,6 @@
 /*
  * Structs
  */
-
-/* Context */
-struct pci_ctx {
-	/* FD to /dev/pci */
-	int fd;
-
-	/* PCI device selector */
-	struct pcisel sel;
-
-	/* Generic IO */
-	struct pci_conf_io pc;
-};
 
 struct prog_ctx {
 	/* Executable name */
@@ -285,36 +261,10 @@ mask_set_defaults(
 }
 
 /*
- * Free PCI context members
- */
-static void
-free_pci_ctx(
-	struct pci_ctx *pci
-	)
-{
-	LOG("Cleaning context");
-
-	if (pci->fd > -1) {
-		close(pci->fd);
-		pci->fd = -1;
-	}
-
-	if (pci->pc.patterns != NULL) {
-		free(pci->pc.patterns);
-		pci->pc.patterns = NULL;
-	}
-
-	if (pci->pc.matches != NULL) {
-		free(pci->pc.matches);
-		pci->pc.matches = NULL;
-	}
-}
-
-/*
  * Free program context members
  */
 static void
-free_prog_ctx(
+prog_ctx_free(
 	struct prog_ctx *prog
 	)
 {
@@ -417,170 +367,256 @@ parse_csx(
 }
 
 /*
- * Parse a PCI selector
- * Adapted from /usr/src/usr.sbin/pciconf/pciconf.c
+ * Open the state file
+ *
+ * Returns:
+ *   0 - Success
+ *  -1 - Failure
+ *
+ * If mode is STORE, create a file if it doesn't exist
+ */
+static int
+state_open(
+	struct prog_ctx *prog,
+	char *path,
+	int mode
+	)
+{
+	struct stat s;
+
+	if (stat(path, &s) == 0) {
+		if (!S_ISREG(s.st_mode)) {
+			fprintf(stderr, "%s: Savestate is not a regular file\n",
+				prog->name);
+			return (-1);
+		}
+	} else if (errno == ENOENT) {
+		if (mode == MODE_STORE) {
+			/* fopen() creates a new file */
+			errno = 0;
+		} else {
+			fprintf(stderr, "%s: Savestate does not exist\n",
+				prog->name);
+			return (-1);
+		}
+	} else {
+		perror("stat()");
+		return (-1);
+	}
+
+	if (mode == MODE_STORE) {
+		LOGV("Opening '%s' for writing", path);
+		prog->state_fp = fopen(path, "wb");
+	} else {
+		LOGV("Opening '%s' for reading", path);
+		prog->state_fp = fopen(path, "rb");
+	}
+
+	if (prog->state_fp == NULL) {
+		perror("fopen()");
+		return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Load state from file to device
  *
  * Returns:
  *   0 - Success
  *  -1 - Failure
  */
 static int
-pci_parse_sel(
-	const char *str,
-	struct pcisel *sel
+state_load(
+	struct pci_ctx *pci,
+	struct prog_ctx *prog
 	)
 {
-	const char *ep;
-	char *eppos;
-	unsigned long selarr[4];
-	int i;
-
-	ep = strchr(str, '@');
-	if (ep != NULL) {
-		ep++;
-	} else {
-		ep = str;
+	if (state_open(prog, prog->a_savefile, prog->mode) < 0) {
+		return (-1);
 	}
 
-	if (strncmp(ep, "pci", 3) == 0) {
-		ep += 3;
-		i = 0;
-		while (isdigit((unsigned char)*ep) && i < 4) {
-			selarr[i++] = strtoul(ep, &eppos, 10);
-			ep = eppos;
-			if (*ep == ':') {
-				ep++;
+	struct pci_save state;
+	struct pci_conf *match = &pci->pc.matches[0];
+
+	if (fread(&state, sizeof(struct pci_save), 1, prog->state_fp) != 1) {
+		fprintf(stderr, "%s: Could not read savefile\n", prog->name);
+		return (-1);
+	}
+
+	if (memcmp(state.magic, "\x09SAV", 4) != 0) {
+		fprintf(stderr, "%s: Wrong savefile magic\n", prog->name);
+		return (-1);
+	}
+
+	if (state.version > HDR_VERSION) {
+		fprintf(stderr, "%s: Savefile format too new\n", prog->name);
+		return (-1);
+	} else if (state.version < HDR_VERSION) {
+		fprintf(stderr, "%s: Outdated savefile format\n", prog->name);
+		return (-1);
+	}
+
+	if (state.vendor != match->pc_vendor ||
+		state.device != match->pc_device) {
+
+		fprintf(stderr, "%s: Savefile PCI vendor/device do not match\n",
+			prog->name);
+		return (-1);
+	} else if (state.subvendor != match->pc_subvendor ||
+		state.subdevice != match->pc_subdevice) {
+
+		fprintf(stderr, "%s: Warning: Savefile PCI subvendor/subdevice "
+			"do not match\n", prog->name);
+	}
+
+	/* Parse the lists */
+	if (prog->yeslist) {
+		memset(state.config_mask, 0, CFG_EXT_MASK_SZ);
+		for (size_t i = 0; i < prog->yeslist_len; i++) {
+			mask_set(state.config_mask, prog->yeslist[i] / 4);
+		}
+	} else if (prog->nolist) {
+		for (size_t i = 0; i < prog->nolist_len; i++) {
+			mask_clr(state.config_mask, prog->nolist[i] / 4);
+		}
+	}
+
+	/* dwords */
+	size_t end = 0;
+	if (prog->flag_ext) {
+		end = CFG_EXT_SZ;
+		LOG("Writing extended config space");
+	} else {
+		end = CFG_SZ;
+		LOG("Writing regular config space");
+	}
+
+	for (size_t i = 0; i < end; i += 4) {
+		if (!mask_get(state.config_mask, i / 4)) {
+			continue;
+		}
+
+		uint32_t dw;
+		memcpy(&dw, state.config + i, sizeof(uint32_t));
+		if (pci_cfg_write(pci, &dw, i, 4) < 0) {
+			fprintf(stderr, "%s: Could not write config space at "
+				"0x%zX\n", prog->name, i);
+		}
+	}
+
+	if (prog->flag_validate) {
+		int perfect = 1;
+		LOG("Validating the loaded config space");
+		for (size_t i = 0; i < end; i += 4) {
+			uint32_t dw_cfg,
+				 dw_pci;
+
+			if (!mask_get(state.config_mask, i)) {
+				continue;
+			}
+
+			if (pci_cfg_read(pci, &dw_pci, i, 4) < 0) {
+				fprintf(stderr, "%s: Could not read config "
+					"space at 0x%zX\n", prog->name, i);
+				return (-1);
+			}
+
+			memcpy(&dw_cfg, state.config + i, sizeof(uint32_t));
+
+			if (dw_cfg != dw_pci) {
+				fprintf(stderr, "Dword at offset 0x%zX did "
+					"not stick! (save:0x%08X pci:0x%08X)\n",
+					i, dw_cfg, dw_pci);
+				perfect = 0;
 			}
 		}
-		if (i > 0 && *ep == '\0') {
-			sel->pc_func = (i > 2) ? selarr[--i] : 0;
-			sel->pc_dev = (i > 0) ? selarr[--i] : 0;
-			sel->pc_bus = (i > 0) ? selarr[--i] : 0;
-			sel->pc_domain = (i > 0) ? selarr[--i] : 0;
-			return (0);
+
+		if (perfect) {
+			fprintf(stderr, "Every dword loaded successfully!\n");
 		}
 	}
 
-	return (-1);
-}
-
-/*
- * Read a dword from config space
- *
- * Returns:
- *   0 - Success
- *  -1 - Failure
- */
-static int
-pci_cfg_read_dword(
-	struct pci_ctx *pci,
-	uint32_t *dw,
-	size_t dwi
-	)
-{
-	struct pci_io io = {0};
-
-	io.pi_sel = pci->sel;
-	io.pi_reg = dwi * 4;
-	io.pi_width = 4;
-
-	if (ioctl(pci->fd, PCIOCREAD, &io) < 0) {
-		perror("ioctl(PCIOCREAD)");
-		return (-1);
-	}
-
-	*dw = io.pi_data;
-
 	return (0);
 }
 
 /*
- * Write a dword to config space
+ * Save state from device to file
  *
  * Returns:
  *   0 - Success
  *  -1 - Failure
  */
 static int
-pci_cfg_write_dword(
+state_save(
 	struct pci_ctx *pci,
-	uint32_t dw,
-	size_t dwi
+	struct prog_ctx *prog
 	)
 {
-	struct pci_io io = {0};
-
-	io.pi_sel = pci->sel;
-	io.pi_reg = dwi * 4;
-	io.pi_width = 4;
-	io.pi_data = dw;
-
-	if (ioctl(pci->fd, PCIOCWRITE, &io) < 0) {
-		perror("ioctl(PCIOCWRITE)");
+	if (state_open(prog, prog->a_savefile, prog->mode) < 0) {
 		return (-1);
 	}
 
-	return (0);
-}
+	struct pci_save state = {0};
+	struct pci_conf *match = &pci->pc.matches[0];
 
-/*
- * Open a PCI device from a selector and fill in pci_ctx
- *
- * Returns:
- *   0 - Success
- *  -1 - Failure
- */
-static int
-pci_open(
-	struct prog_ctx *prog,
-	struct pci_ctx *pci
-	)
-{
-	LOGV("Opening PCI device pci%u:%u:%u:%u", pci->sel.pc_domain,
-		pci->sel.pc_bus, pci->sel.pc_dev, pci->sel.pc_func);
-	struct pci_conf_io *pc = &pci->pc;
+	memcpy(state.magic, "\x09SAV", 4);
+	state.version = HDR_VERSION;
+	state.vendor = match->pc_vendor;
+	state.device = match->pc_device;
+	state.subvendor = match->pc_subvendor;
+	state.subdevice = match->pc_subdevice;
 
-	pc->num_patterns = 1;
-	pc->pat_buf_len = pc->num_patterns * sizeof(struct pci_match_conf);
-	pc->patterns = calloc(pc->num_patterns, sizeof(struct pci_match_conf));
-	if (pc->patterns == NULL) {
-		perror("calloc()");
-		return (-1);
-	}
-	pc->patterns->pc_sel = pci->sel;
-	pc->patterns->flags = PCI_GETCONF_MATCH_DOMAIN | PCI_GETCONF_MATCH_BUS
-		| PCI_GETCONF_MATCH_DEV | PCI_GETCONF_MATCH_FUNC;
-
-	pc->match_buf_len = 1 * sizeof(struct pci_conf);
-	pc->matches = calloc(1, sizeof(struct pci_conf));
-	if (pc->matches == NULL) {
-		perror("calloc()");
-		return (-1);
+	if (prog->flag_validate) {
+		fprintf(stderr, "%s: Warning: validate flag ignored on save\n",
+			prog->name);
 	}
 
-	pci->fd = open("/dev/pci", O_RDWR);
-	if (pci->fd == -1) {
-		perror("open(/dev/pci)");
-		return (-1);
+	if (prog->yeslist) {
+		for (size_t i = 0; i < prog->yeslist_len; i++) {
+			mask_set(state.config_mask, prog->yeslist[i] / 4);
+		}
+	} else {
+		mask_set_defaults(state.config_mask);
+		if (prog->nolist) {
+			for (size_t i = 0; i < prog->nolist_len; i++) {
+				mask_clr(state.config_mask, prog->nolist[i] / 4);
+			}
+		}
 	}
 
-do_ioctl:
-	if (ioctl(pci->fd, PCIOCGETCONF, pc) < 0) {
-		perror("ioctl(PCIOCGETCONF)");
-		return (-1);
+	/* Read regular config space */
+	for (size_t i = 0; i < CFG_SZ; i += 4) {
+		uint32_t dw;
+		if (pci_cfg_read(pci, &dw, i, 4) < 0) {
+			fprintf(stderr, "%s: Could not read config space at "
+				"0x%zX\n", prog->name, i);
+			return (-1);
+		}
+		memcpy(state.config + i, &dw, sizeof(uint32_t));
 	}
 
-	if (pc->status == PCI_GETCONF_ERROR) {
-		LOGV("PCIOCGETCONF status = %d", pc->status);
-		fprintf(stderr, "%s: PCI_GETCONF_ERROR\n", prog->name);
-		return (-1);
-	} else if (pc->status == PCI_GETCONF_LIST_CHANGED) {
-		/* loop back until the status clears */
-		goto do_ioctl;
+	if (prog->flag_ext) {
+		for (size_t i = CFG_SZ; i < CFG_EXT_SZ; i += 4) {
+			uint32_t dw;
+			if (pci_cfg_read(pci, &dw, i, 4) < 0) {
+				fprintf(stderr, "Only saving regular"
+					"config space\n");
+				errno = 0;
+				goto noext;
+			}
+			memcpy(state.config + i, &dw, sizeof(uint32_t));
+		}
+	} else {
+noext:
+		memset(state.config_mask + CFG_MASK_SZ, 0,
+			CFG_EXT_MASK_SZ - CFG_MASK_SZ);
 	}
 
-	if (pc->num_matches == 0) {
-		errno = 0;
+	if (fwrite(&state, sizeof(struct pci_save), 1, prog->state_fp) != 1) {
+		fprintf(stderr, "%s: Could not write header to savefile\n",
+			prog->name);
 		return (-1);
 	}
 
@@ -662,6 +698,11 @@ parse_prog_args(
 
 	prog->a_savefile = argv[optind++];
 
+	if (prog->a_device == NULL) {
+		fprintf(stderr, "%s: Device not specified\n", prog->name);
+		usage(prog->name, 0);
+	}
+
 	if (optind != argc) {
 		fprintf(stderr, "%s: Trailing arguments after savefile\n",
 			prog->name);
@@ -672,8 +713,8 @@ parse_prog_args(
 	 * Validate arguments
 	 */
 
-	if (prog->a_savefile == NULL || prog->a_device == NULL) {
-		fprintf(stderr, "%s: Savefile or device not specified\n",
+	if (prog->a_savefile == NULL) {
+		fprintf(stderr, "%s: Savefile not specified\n",
 			prog->name);
 		usage(prog->name, 0);
 	} else if (prog->a_yeslist != NULL && prog->a_nolist != NULL) {
@@ -736,263 +777,6 @@ parse_prog_args(
 }
 
 /*
- * Open the state file
- *
- * Returns:
- *   0 - Success
- *  -1 - Failure
- *
- * If mode is STORE, create a file if it doesn't exist
- */
-static int
-pci_state_open(
-	struct prog_ctx *prog,
-	char *path,
-	int mode
-	)
-{
-	struct stat s;
-
-	if (stat(path, &s) == 0) {
-		if (!S_ISREG(s.st_mode)) {
-			fprintf(stderr, "%s: Savestate is not a regular file\n",
-				prog->name);
-			return (-1);
-		}
-	} else if (errno == ENOENT) {
-		if (mode == MODE_STORE) {
-			/* fopen() creates a new file */
-			errno = 0;
-		} else {
-			fprintf(stderr, "%s: Savestate does not exist\n",
-				prog->name);
-			return (-1);
-		}
-	} else {
-		perror("stat()");
-		return (-1);
-	}
-
-	if (mode == MODE_STORE) {
-		LOGV("Opening '%s' for writing", path);
-		prog->state_fp = fopen(path, "wb");
-	} else {
-		LOGV("Opening '%s' for reading", path);
-		prog->state_fp = fopen(path, "rb");
-	}
-
-	if (prog->state_fp == NULL) {
-		perror("fopen()");
-		return (-1);
-	}
-
-	return (0);
-}
-
-/*
- * Load state from file to device
- *
- * Returns:
- *   0 - Success
- *  -1 - Failure
- */
-static int
-pci_state_load(
-	struct pci_ctx *pci,
-	struct prog_ctx *prog
-	)
-{
-	if (pci_state_open(prog, prog->a_savefile, prog->mode) < 0) {
-		return (-1);
-	}
-
-	struct pci_save state;
-	struct pci_conf *match = &pci->pc.matches[0];
-
-	if (fread(&state, sizeof(struct pci_save), 1, prog->state_fp) != 1) {
-		fprintf(stderr, "%s: Could not read savefile\n", prog->name);
-		return (-1);
-	}
-
-	if (memcmp(state.magic, "\x09SAV", 4) != 0) {
-		fprintf(stderr, "%s: Wrong savefile magic\n", prog->name);
-		return (-1);
-	}
-
-	if (state.version > HDR_VERSION) {
-		fprintf(stderr, "%s: Savefile format too new\n", prog->name);
-		return (-1);
-	} else if (state.version < HDR_VERSION) {
-		fprintf(stderr, "%s: Outdated savefile format\n", prog->name);
-		return (-1);
-	}
-
-	if (state.vendor != match->pc_vendor ||
-		state.device != match->pc_device) {
-
-		fprintf(stderr, "%s: Savefile PCI vendor/device do not match\n",
-			prog->name);
-		return (-1);
-	} else if (state.subvendor != match->pc_subvendor ||
-		state.subdevice != match->pc_subdevice) {
-
-		fprintf(stderr, "%s: Warning: Savefile PCI subvendor/subdevice "
-			"do not match\n", prog->name);
-	}
-
-	/* Parse the lists */
-	if (prog->yeslist) {
-		memset(state.config_mask, 0, CFG_EXT_MASK_SZ);
-		for (size_t i = 0; i < prog->yeslist_len; i++) {
-			mask_set(state.config_mask, prog->yeslist[i] / 4);
-		}
-	} else if (prog->nolist) {
-		for (size_t i = 0; i < prog->nolist_len; i++) {
-			mask_clr(state.config_mask, prog->nolist[i] / 4);
-		}
-	}
-
-	/* dwords */
-	size_t end = 0;
-	if (prog->flag_ext) {
-		end = CFG_EXT_SZ / 4;
-		LOG("Writing extended config space");
-	} else {
-		end = CFG_SZ / 4;
-		LOG("Writing regular config space");
-	}
-
-	for (size_t i = 0; i < end; i++) {
-		if (!mask_get(state.config_mask, i)) {
-			continue;
-		}
-
-		uint32_t dw;
-		memcpy(&dw, state.config + i * 4, sizeof(uint32_t));
-		if (pci_cfg_write_dword(pci, dw, i) < 0) {
-			return (-1);
-		}
-	}
-
-	if (prog->flag_validate) {
-		int perfect = 1;
-		LOG("Validating the loaded config space");
-		for (size_t i = 0; i < end; i++) {
-			uint32_t dw_cfg,
-				 dw_pci;
-
-			if (!mask_get(state.config_mask, i)) {
-				continue;
-			}
-
-			if (pci_cfg_read_dword(pci, &dw_pci, i) < 0) {
-				return (-1);
-			}
-
-			memcpy(&dw_cfg, state.config + i * 4, sizeof(uint32_t));
-
-			if (dw_cfg != dw_pci) {
-				fprintf(stderr, "%s: dword at offset 0x%zX did "
-					"not stick! (save:0x%08X pci:0x%08X)\n",
-					prog->name, i * 4, dw_cfg, dw_pci);
-				perfect = 0;
-			}
-		}
-
-		if (perfect) {
-			fprintf(stderr,
-				"%s: Every dword loaded successfully!\n",
-				prog->name);
-		}
-	}
-
-	return (0);
-}
-
-/*
- * Save state from device to file
- *
- * Returns:
- *   0 - Success
- *  -1 - Failure
- */
-static int
-pci_state_save(
-	struct pci_ctx *pci,
-	struct prog_ctx *prog
-	)
-{
-	if (pci_state_open(prog, prog->a_savefile, prog->mode) < 0) {
-		return (-1);
-	}
-
-	struct pci_save state = {0};
-	struct pci_conf *match = &pci->pc.matches[0];
-
-	memcpy(state.magic, "\x09SAV", 4);
-	state.version = HDR_VERSION;
-	state.vendor = match->pc_vendor;
-	state.device = match->pc_device;
-	state.subvendor = match->pc_subvendor;
-	state.subdevice = match->pc_subdevice;
-
-	if (prog->flag_validate) {
-		fprintf(stderr, "%s: Warning: validate flag ignored on save\n",
-			prog->name);
-	}
-
-	if (prog->yeslist) {
-		for (size_t i = 0; i < prog->yeslist_len; i++) {
-			mask_set(state.config_mask, prog->yeslist[i] / 4);
-		}
-	} else {
-		mask_set_defaults(state.config_mask);
-		if (prog->nolist) {
-			for (size_t i = 0; i < prog->nolist_len; i++) {
-				mask_clr(state.config_mask, prog->nolist[i] / 4);
-			}
-		}
-	}
-
-	/* Read regular config space */
-	for (size_t i = 0; i < CFG_SZ / 4; i++) {
-		uint32_t dw;
-		if (pci_cfg_read_dword(pci, &dw, i) < 0) {
-			LOG("Error reading config space");
-			return (-1);
-		}
-		memcpy(state.config + i * 4, &dw, sizeof(uint32_t));
-	}
-
-	if (prog->flag_ext) {
-		for (size_t i = CFG_SZ / 4; i < CFG_EXT_SZ / 4; i++) {
-			uint32_t dw;
-			if (pci_cfg_read_dword(pci, &dw, i) < 0) {
-				fprintf(stderr, "%s: Could not grab extended "
-					"config, only saving regular "
-					"config space\n",
-					prog->name);
-				errno = 0;
-				goto noext;
-			}
-			memcpy(state.config + i * 4, &dw, sizeof(uint32_t));
-		}
-	} else {
-noext:
-		memset(state.config_mask + CFG_MASK_SZ, 0,
-			CFG_EXT_MASK_SZ - CFG_MASK_SZ);
-	}
-
-	if (fwrite(&state, sizeof(struct pci_save), 1, prog->state_fp) != 1) {
-		fprintf(stderr, "%s: Could not write header to savefile\n",
-			prog->name);
-		return (-1);
-	}
-
-	return (0);
-}
-
-/*
  * Main
  */
 int
@@ -1012,7 +796,7 @@ main(
 	}
 
 	errno = 0;
-	if (pci_open(&prog, &pci) < 0) {
+	if (pci_open(&pci) < 0) {
 		if (!errno) {
 			fprintf(stderr, "%s: No matching PCI device\n",
 				prog.name);
@@ -1021,21 +805,21 @@ main(
 	}
 
 	if (prog.mode == MODE_LOAD) {
-		if (pci_state_load(&pci, &prog) < 0) {
+		if (state_load(&pci, &prog) < 0) {
 			goto error;
 		}
 	} else {
-		if (pci_state_save(&pci, &prog) < 0) {
+		if (state_save(&pci, &prog) < 0) {
 			goto error;
 		}
 	}
 
-	free_prog_ctx(&prog);
-	free_pci_ctx(&pci);
+	prog_ctx_free(&prog);
+	pci_ctx_free(&pci);
 	return (EXIT_SUCCESS);
 error:
 	LOGV("Hello, error handler! errno = %d", errno);
-	free_prog_ctx(&prog);
-	free_pci_ctx(&pci);
+	prog_ctx_free(&prog);
+	pci_ctx_free(&pci);
 	return (EXIT_FAILURE);
 }

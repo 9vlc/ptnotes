@@ -1,4 +1,6 @@
 a.out
 *.elf
 *.swp
+*.rom
 *.tmp
+utils/out
