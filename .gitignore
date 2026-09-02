@@ -3,4 +3,4 @@ a.out
 *.swp
 *.rom
 *.tmp
-utils/out
+utils/build

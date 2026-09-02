@@ -1,31 +1,6 @@
 /*
  * SPDX-License-Identifier: BSD-3-Clause
  * Copyright (c) 2026 Alexey Laurentsyeu <alex@paidbsd.org>
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- * 	notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- * 	notice, this list of conditions and the following disclaimer in the
- * 	documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its
- * 	contributors may be used to endorse or promote products derived from
- * 	this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
- * TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 /*
@@ -35,24 +10,16 @@
 #include <sys/stat.h>
 
 #include <ctype.h>
-#include <fcntl.h>
 #include <errno.h>
-#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
 
-#include <pci.h>
-
-/*
- * Macros
- */
-
-#define CFG_SZ		(256)
-#define CFG_MASK_SZ	(CFG_SZ / 8 / 4)
-#define CFG_EXT_SZ	(4096)
-#define CFG_EXT_MASK_SZ	(CFG_EXT_SZ / 8 / 4)
+#include <debug.h>
+#include <crc32.h>
+#include <pcisave.h>
+#include <nyetpci.h>
 
 /*
  * Structs
@@ -63,9 +30,9 @@ struct prog_ctx {
 	char *name;
 
 	/* State file pointer */
-	FILE *state_fp;
+	FILE *fp;
 
-	/* Operation mode (MODE_INVALID / MODE_STORE / MODE_LOAD) */
+	/* Operation mode (MODE_INVALID / MODE_SAVE / MODE_LOAD) */
 	int mode;
 
 	/* Also write extended config space */
@@ -89,63 +56,7 @@ struct prog_ctx {
 	uint16_t *nolist;
 };
 
-/* Savefile header */
-#define HDR_VERSION 2
-#pragma pack(push, 1)
-struct pci_save {
-	/* 0; 0x9 + "SAV" */
-	char magic[4];
-
-	/* 4; Header version */
-	uint16_t version;
-
-	/* 6; PCI vendor ID */
-	uint16_t vendor;
-
-	/* 8; PCI device ID */
-	uint16_t device;
-
-	/* 10; PCI subsystem vendor ID */
-	uint16_t subvendor;
-
-	/* 12; PCI subsystem device ID */
-	uint16_t subdevice;
-
-	/* 14; Extended config space mask */
-	uint8_t config_mask[CFG_EXT_MASK_SZ];
-
-	/* 142; Extended config space */
-	uint8_t config[CFG_EXT_SZ];
-
-	/* 4238 */
-};
-#pragma pack(pop)
-
-enum { MODE_INVALID, MODE_STORE, MODE_LOAD };
-
-/*
- * Variables
- */
-
-static const uint16_t cfg_ro_dwords[] = {
-	/* IDs */
-	0x00, 0x08,
-
-	/* CLS; LT; HT; BIST */
-	0x0C,
-
-	/* CardBus CIS pointer */
-	0x28,
-
-	/* Subsystem IDs */
-	0x2C,
-
-	/* Capabilities; Reserved */
-	0x34, 0x38,
-
-	/* IL; IP; Timer */
-	0x3C
-};
+enum { MODE_INVALID, MODE_SAVE, MODE_LOAD };
 
 /*
  * Functions
@@ -157,10 +68,7 @@ static const uint16_t cfg_ro_dwords[] = {
  * If arg2 = 1, print full usage instructions
  */
 static void
-usage(
-	const char *name,
-	int full
-	)
+usage(const char *name, const int full)
 {
 	fprintf(stderr,
 "usage: %s -h\n"
@@ -209,6 +117,7 @@ usage(
 	exit(EXIT_FAILURE);
 }
 
+
 /*
  * Bitmask access functions
  *
@@ -216,40 +125,29 @@ usage(
  */
 
 static inline int
-mask_get(
-	uint8_t *mask,
-	unsigned int i
-	)
+mask_get(uint8_t *mask, const unsigned int i)
 {
 	return ((mask[i / 8] >> (i % 8)) & 1);
 }
 
 static inline void
-mask_set(
-	uint8_t *mask,
-	unsigned int i
-	)
+mask_set(uint8_t *mask, const unsigned int i)
 {
 	mask[i / 8] |= (uint8_t)(1u << (i % 8));
 }
 
 static inline void
-mask_clr(
-	uint8_t *mask,
-	unsigned int i
-	)
+mask_clr(uint8_t *mask, const unsigned int i)
 {
 	mask[i / 8] &= (uint8_t)~(1u << (i % 8));
 }
 
 /*
  * Build the default config space bitmask
+ * Input is a 128 byte array
  */
 static void
-mask_set_defaults(
-	/* 128 byte array (4096 / 8 / 4) */
-	uint8_t *mask
-	)
+mask_set_defaults(uint8_t *mask)
 {
 	memset(mask, 0xFF, CFG_EXT_MASK_SZ);
 
@@ -264,13 +162,13 @@ mask_set_defaults(
  * Free program context members
  */
 static void
-prog_ctx_free(
-	struct prog_ctx *prog
-	)
+prog_free(struct prog_ctx *prog)
 {
-        if (prog->state_fp != NULL) {
-		fclose(prog->state_fp);
-		prog->state_fp = NULL;
+	LOG("Freeing program context");
+
+        if (prog->fp != NULL) {
+		fclose(prog->fp);
+		prog->fp = NULL;
         }
 
 	if (prog->nolist != NULL) {
@@ -295,10 +193,7 @@ prog_ctx_free(
  *   parsed list length.
  */
 static uint16_t *
-parse_csx(
-	char *list,
-	size_t *outlen
-	)
+parse_csx(char *list, size_t *outlen)
 {
 	char *cc = list;
 	int nums = 1;
@@ -373,14 +268,10 @@ parse_csx(
  *   0 - Success
  *  -1 - Failure
  *
- * If mode is STORE, create a file if it doesn't exist
+ * If mode is SAVE, create a file if it doesn't exist
  */
 static int
-state_open(
-	struct prog_ctx *prog,
-	char *path,
-	int mode
-	)
+state_open(struct prog_ctx *prog, char *path)
 {
 	struct stat s;
 
@@ -391,7 +282,7 @@ state_open(
 			return (-1);
 		}
 	} else if (errno == ENOENT) {
-		if (mode == MODE_STORE) {
+		if (prog->mode == MODE_SAVE) {
 			/* fopen() creates a new file */
 			errno = 0;
 		} else {
@@ -404,16 +295,106 @@ state_open(
 		return (-1);
 	}
 
-	if (mode == MODE_STORE) {
+	if (prog->mode == MODE_SAVE) {
 		LOGV("Opening '%s' for writing", path);
-		prog->state_fp = fopen(path, "wb");
+		prog->fp = fopen(path, "wb");
 	} else {
 		LOGV("Opening '%s' for reading", path);
-		prog->state_fp = fopen(path, "rb");
+		prog->fp = fopen(path, "rb");
 	}
 
-	if (prog->state_fp == NULL) {
+	if (prog->fp == NULL) {
 		perror("fopen()");
+		return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Save state from device to file
+ *
+ * Returns:
+ *   0 - Success
+ *  -1 - Failure
+ */
+static int
+state_save(struct prog_ctx *prog, struct nyetpci_ctx *pci)
+{
+	if (state_open(prog, prog->a_savefile) < 0) {
+		return (-1);
+	}
+
+	struct pci_save state = {0};
+
+	memcpy(state.magic, "\x09SAV", 4);
+	state.version = HDR_VERSION;
+
+	if (	(nyetpci_get_vendor(pci, &state.vendor) < 0) ||
+		(nyetpci_get_device(pci, &state.device) < 0) ||
+		(nyetpci_get_subvendor(pci, &state.subvendor) < 0) ||
+		(nyetpci_get_subdevice(pci, &state.subdevice) < 0)) {
+
+		return (-1);
+	}
+
+	if (prog->flag_validate) {
+		fprintf(stderr, "%s: Warning: validate flag ignored on save\n",
+			prog->name);
+	}
+
+	if (prog->yeslist) {
+		for (size_t i = 0; i < prog->yeslist_len; i++) {
+			mask_set(state.config_mask, prog->yeslist[i] / 4);
+		}
+	} else {
+		mask_set_defaults(state.config_mask);
+		if (prog->nolist) {
+			for (size_t i = 0; i < prog->nolist_len; i++) {
+				mask_clr(state.config_mask, prog->nolist[i] / 4);
+			}
+		}
+	}
+
+	/* Read regular config space */
+	for (size_t i = 0; i < CFG_SZ; i += 4) {
+		uint32_t dw;
+		if (nyetpci_cfg_read(pci, i, 4, &dw) < 0) {
+			fprintf(stderr, "%s: Could not read config space at "
+				"0x%zX\n", prog->name, i);
+			return (-1);
+		}
+		memcpy(state.config + i, &dw, sizeof(uint32_t));
+	}
+
+	if (prog->flag_ext) {
+		for (size_t i = CFG_SZ; i < CFG_EXT_SZ; i += 4) {
+			uint32_t dw;
+			if (nyetpci_cfg_read(pci, i, 4, &dw) < 0) {
+				fprintf(stderr, "Only saving regular"
+					"config space\n");
+				errno = 0;
+				goto noext;
+			}
+			memcpy(state.config + i, &dw, sizeof(uint32_t));
+		}
+	} else {
+noext:
+		memset(state.config_mask + CFG_MASK_SZ, 0,
+			CFG_EXT_MASK_SZ - CFG_MASK_SZ);
+	}
+
+	/* Checksum */
+	uint32_t crc = UINT32_MAX;
+	for (uint32_t i = 0; i < sizeof(struct pci_save); i++) {
+		crc = crc32_step(crc, ((uint8_t *)&state)[i]);
+	}
+	crc ^= UINT32_MAX;
+	state.checksum = crc;
+
+	if (fwrite(&state, sizeof(struct pci_save), 1, prog->fp) != 1) {
+		fprintf(stderr, "%s: Could not write header to savefile\n",
+			prog->name);
 		return (-1);
 	}
 
@@ -428,19 +409,15 @@ state_open(
  *  -1 - Failure
  */
 static int
-state_load(
-	struct pci_ctx *pci,
-	struct prog_ctx *prog
-	)
+state_load(struct prog_ctx *prog, struct nyetpci_ctx *pci)
 {
-	if (state_open(prog, prog->a_savefile, prog->mode) < 0) {
+	if (state_open(prog, prog->a_savefile) < 0) {
 		return (-1);
 	}
 
 	struct pci_save state;
-	struct pci_conf *match = &pci->pc.matches[0];
 
-	if (fread(&state, sizeof(struct pci_save), 1, prog->state_fp) != 1) {
+	if (fread(&state, sizeof(struct pci_save), 1, prog->fp) != 1) {
 		fprintf(stderr, "%s: Could not read savefile\n", prog->name);
 		return (-1);
 	}
@@ -458,14 +435,33 @@ state_load(
 		return (-1);
 	}
 
-	if (state.vendor != match->pc_vendor ||
-		state.device != match->pc_device) {
+	uint32_t crc = UINT32_MAX;
+	for (uint32_t i = 0; i < sizeof(struct pci_save); i++) {
+		crc = crc32_step(crc, ((uint8_t *)&state)[i]);
+	}
+	crc ^= UINT32_MAX;
 
+	if (state.checksum != crc) {
+		fprintf(stderr, "%s: Invalid savefile checksum\n", prog->name);
+		return (-1);
+	}
+
+	uint16_t vendor, device, subvendor, subdevice;
+
+	if (	(nyetpci_get_vendor(pci, &vendor) < 0) ||
+		(nyetpci_get_device(pci, &device) < 0) ||
+		(nyetpci_get_subvendor(pci, &subvendor) < 0) ||
+		(nyetpci_get_subdevice(pci, &subdevice) < 0)) {
+
+		return (-1);
+	}
+
+	if (state.vendor != vendor || state.device != device) {
 		fprintf(stderr, "%s: Savefile PCI vendor/device do not match\n",
 			prog->name);
 		return (-1);
-	} else if (state.subvendor != match->pc_subvendor ||
-		state.subdevice != match->pc_subdevice) {
+	} else if (state.subvendor != subvendor ||
+		state.subdevice != subdevice) {
 
 		fprintf(stderr, "%s: Warning: Savefile PCI subvendor/subdevice "
 			"do not match\n", prog->name);
@@ -500,7 +496,7 @@ state_load(
 
 		uint32_t dw;
 		memcpy(&dw, state.config + i, sizeof(uint32_t));
-		if (pci_cfg_write(pci, &dw, i, 4) < 0) {
+		if (nyetpci_cfg_write(pci, i, 4, &dw) < 0) {
 			fprintf(stderr, "%s: Could not write config space at "
 				"0x%zX\n", prog->name, i);
 		}
@@ -517,7 +513,7 @@ state_load(
 				continue;
 			}
 
-			if (pci_cfg_read(pci, &dw_pci, i, 4) < 0) {
+			if (nyetpci_cfg_read(pci, i, 4, &dw_pci) < 0) {
 				fprintf(stderr, "%s: Could not read config "
 					"space at 0x%zX\n", prog->name, i);
 				return (-1);
@@ -542,104 +538,15 @@ state_load(
 }
 
 /*
- * Save state from device to file
- *
- * Returns:
- *   0 - Success
- *  -1 - Failure
- */
-static int
-state_save(
-	struct pci_ctx *pci,
-	struct prog_ctx *prog
-	)
-{
-	if (state_open(prog, prog->a_savefile, prog->mode) < 0) {
-		return (-1);
-	}
-
-	struct pci_save state = {0};
-	struct pci_conf *match = &pci->pc.matches[0];
-
-	memcpy(state.magic, "\x09SAV", 4);
-	state.version = HDR_VERSION;
-	state.vendor = match->pc_vendor;
-	state.device = match->pc_device;
-	state.subvendor = match->pc_subvendor;
-	state.subdevice = match->pc_subdevice;
-
-	if (prog->flag_validate) {
-		fprintf(stderr, "%s: Warning: validate flag ignored on save\n",
-			prog->name);
-	}
-
-	if (prog->yeslist) {
-		for (size_t i = 0; i < prog->yeslist_len; i++) {
-			mask_set(state.config_mask, prog->yeslist[i] / 4);
-		}
-	} else {
-		mask_set_defaults(state.config_mask);
-		if (prog->nolist) {
-			for (size_t i = 0; i < prog->nolist_len; i++) {
-				mask_clr(state.config_mask, prog->nolist[i] / 4);
-			}
-		}
-	}
-
-	/* Read regular config space */
-	for (size_t i = 0; i < CFG_SZ; i += 4) {
-		uint32_t dw;
-		if (pci_cfg_read(pci, &dw, i, 4) < 0) {
-			fprintf(stderr, "%s: Could not read config space at "
-				"0x%zX\n", prog->name, i);
-			return (-1);
-		}
-		memcpy(state.config + i, &dw, sizeof(uint32_t));
-	}
-
-	if (prog->flag_ext) {
-		for (size_t i = CFG_SZ; i < CFG_EXT_SZ; i += 4) {
-			uint32_t dw;
-			if (pci_cfg_read(pci, &dw, i, 4) < 0) {
-				fprintf(stderr, "Only saving regular"
-					"config space\n");
-				errno = 0;
-				goto noext;
-			}
-			memcpy(state.config + i, &dw, sizeof(uint32_t));
-		}
-	} else {
-noext:
-		memset(state.config_mask + CFG_MASK_SZ, 0,
-			CFG_EXT_MASK_SZ - CFG_MASK_SZ);
-	}
-
-	if (fwrite(&state, sizeof(struct pci_save), 1, prog->state_fp) != 1) {
-		fprintf(stderr, "%s: Could not write header to savefile\n",
-			prog->name);
-		return (-1);
-	}
-
-	return (0);
-}
-
-/*
  * Parse program arguments to fill in prog_ctx and pci_ctx.sel
  *
  * Returns:
  *   0 - Success
  *  -1 - Failure
- *
- * Calls usage() on failure before any lists were allocated, after
- *   any malloc() calls returns -1 for main to correctly clean up
  */
 static int
-parse_prog_args(
-	struct prog_ctx *prog,
-	struct pci_ctx *pci,
-	int argc,
-	char *argv[]
-	)
+parse_prog_args(struct prog_ctx *prog, struct nyetpci_ctx *pci,
+	int argc, char *argv[])
 {
 	if (argc < 2) {
 		usage(prog->name, 0);
@@ -650,7 +557,7 @@ parse_prog_args(
 	}
 
 	if (strcmp(argv[1], "save") == 0) {
-		prog->mode = MODE_STORE;
+		prog->mode = MODE_SAVE;
 	} else if (strcmp(argv[1], "load") == 0) {
 		prog->mode = MODE_LOAD;
 	} else {
@@ -724,7 +631,7 @@ parse_prog_args(
 	}
 
 	/* Parse PCI selector */
-	if (pci_parse_sel(prog->a_device, &pci->sel) < 0) {
+	if (nyetpci_parse_sel(prog->a_device, &pci->sel) < 0) {
 		fprintf(stderr, "%s: Invalid device selector\n", prog->name);
 		return (-1);
 	}
@@ -780,46 +687,41 @@ parse_prog_args(
  * Main
  */
 int
-main(
-	int argc,
-	char *argv[]
-	)
+main(int argc, char *argv[])
 {
+	struct nyetpci_ctx pci = {0};
 	struct prog_ctx prog = {0};
+	int ret = EXIT_FAILURE;
+
 	prog.name = argv[0];
 	prog.mode = MODE_INVALID;
-	struct pci_ctx pci = {0};
-	pci.fd = -1;
 
 	if (parse_prog_args(&prog, &pci, argc, argv) < 0) {
-		goto error;
+		goto exit;
 	}
 
-	errno = 0;
-	if (pci_open(&pci) < 0) {
-		if (!errno) {
-			fprintf(stderr, "%s: No matching PCI device\n",
-				prog.name);
-		}
-		goto error;
+	if (nyetpci_init(&pci) < 0) {
+		perror("nyetpci_init()");
+		goto exit;
 	}
 
 	if (prog.mode == MODE_LOAD) {
-		if (state_load(&pci, &prog) < 0) {
-			goto error;
+		if (state_load(&prog, &pci) < 0) {
+			goto exit;
+		}
+	} else if (prog.mode == MODE_SAVE) {
+		if (state_save(&prog, &pci) < 0) {
+			goto exit;
 		}
 	} else {
-		if (state_save(&pci, &prog) < 0) {
-			goto error;
-		}
+		fprintf(stderr, "%s: Mode not set (This should not happen!)\n",
+			prog.name);
+		goto exit;
 	}
 
-	prog_ctx_free(&prog);
-	pci_ctx_free(&pci);
-	return (EXIT_SUCCESS);
-error:
-	LOGV("Hello, error handler! errno = %d", errno);
-	prog_ctx_free(&prog);
-	pci_ctx_free(&pci);
-	return (EXIT_FAILURE);
+	ret = EXIT_SUCCESS;
+exit:
+	(void)nyetpci_free(&pci);
+	prog_free(&prog);
+	return (ret);
 }

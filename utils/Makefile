@@ -1,44 +1,22 @@
-# Change the configuration here!!!
-.include "common.mk"
+.include "contrib/mb/init.mk"
 
-#
-# Targets:
-#   make build - Build the utilities
-#   make clean - Clean up
-#
+.include "src/dirs.mk"
 
-.if ${DEBUG} == 1
-CFLAGS+= ${CFLAGS_DEBUG}
-.else
-CFLAGS+= ${CFLAGS_NODEBUG}
+.if !make(clean)
+.BEGIN:
+	@mkdir -p ${OBJS_ALL:H:O:u} ${EXTRAS_ALL:H:O:u}
 .endif
 
-# Generate library object directives
-LIBFILES:=
-.for f in ${LIBS}
-${OBJDIR}/${f:S/.c/.o/}: lib/${f}
-	${CC} ${CFLAGS} -c -o $@ $^
-LIBFILES+= ${OBJDIR}/${f:S/.c/.o/}
-.endfor
+build: ${OBJS_ALL} ${EXTRAS_ALL}
 
-# Generate executable directives
-EXEFILES:=
-.for f in ${SRCS}
-${OBJDIR}/${f:S/.c/.elf/}: src/${f} ${LIBFILES}
-	${CC} ${CFLAGS} -o $@ $^
-EXEFILES+= ${OBJDIR}/${f:S/.c/.elf/}
-.endfor
+${NYETPCI_LIB}: ${NYETPCI}
+	${MAKE} -C ${NYETPCI} DEBUG=${DEBUG}
 
-# Create objdir, compile libraries, compile executables
-build: ${OBJDIR} ${LIBFILES} ${EXEFILES}
-
-libs: ${OBJDIR} ${LIBFILES}
-
-clean: ${OBJDIR}
+clean:
+	@${MAKE} -C ${NYETPCI} clean
+.if exists(${OBJDIR})
 	rm -rf ${OBJDIR}
+.endif
 
-${OBJDIR}:
-	mkdir -p ${OBJDIR}
-
-.PHONY: clean build
+.PHONY: build clean
 .MAIN: build

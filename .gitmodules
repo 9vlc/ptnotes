@@ -10,3 +10,9 @@
 	path = roms/ext/intel_gpu_firmware
 	url = https://github.com/intel-gpu/intel-gpu-firmware
 	branch = main
+[submodule "utils/contrib/mb"]
+	path = utils/contrib/mb
+	url = https://codeberg.org/9vlc/mb
+[submodule "utils/contrib/nyetpci"]
+	path = utils/contrib/nyetpci
+	url = https://codeberg.org/9vlc/nyetpci
