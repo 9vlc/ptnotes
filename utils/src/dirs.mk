@@ -1,3 +1,3 @@
-SUBDIRS:= pcisave
+SUBDIRS:= pcisave vbiosdump
 
 .include "${MBDIR}/indirs.mk"

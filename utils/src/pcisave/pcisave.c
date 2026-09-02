@@ -68,7 +68,10 @@ enum { MODE_INVALID, MODE_SAVE, MODE_LOAD };
  * If arg2 = 1, print full usage instructions
  */
 static void
-usage(const char *name, const int full)
+usage(
+	const char *name,
+	const int full
+	)
 {
 	fprintf(stderr,
 "usage: %s -h\n"
@@ -125,19 +128,28 @@ usage(const char *name, const int full)
  */
 
 static inline int
-mask_get(uint8_t *mask, const unsigned int i)
+mask_get(
+	uint8_t *mask,
+	const unsigned int i
+	)
 {
 	return ((mask[i / 8] >> (i % 8)) & 1);
 }
 
 static inline void
-mask_set(uint8_t *mask, const unsigned int i)
+mask_set(
+	uint8_t *mask,
+	const unsigned int i
+	)
 {
 	mask[i / 8] |= (uint8_t)(1u << (i % 8));
 }
 
 static inline void
-mask_clr(uint8_t *mask, const unsigned int i)
+mask_clr(
+	uint8_t *mask,
+	const unsigned int i
+	)
 {
 	mask[i / 8] &= (uint8_t)~(1u << (i % 8));
 }
@@ -147,7 +159,9 @@ mask_clr(uint8_t *mask, const unsigned int i)
  * Input is a 128 byte array
  */
 static void
-mask_set_defaults(uint8_t *mask)
+mask_set_defaults(
+	uint8_t *mask
+	)
 {
 	memset(mask, 0xFF, CFG_EXT_MASK_SZ);
 
@@ -162,7 +176,9 @@ mask_set_defaults(uint8_t *mask)
  * Free program context members
  */
 static void
-prog_free(struct prog_ctx *prog)
+prog_free(
+	struct prog_ctx *prog
+	)
 {
 	LOG("Freeing program context");
 
@@ -193,7 +209,10 @@ prog_free(struct prog_ctx *prog)
  *   parsed list length.
  */
 static uint16_t *
-parse_csx(char *list, size_t *outlen)
+parse_csx(
+	char *list,
+	size_t *outlen
+	)
 {
 	char *cc = list;
 	int nums = 1;
@@ -271,7 +290,10 @@ parse_csx(char *list, size_t *outlen)
  * If mode is SAVE, create a file if it doesn't exist
  */
 static int
-state_open(struct prog_ctx *prog, char *path)
+state_open(
+	struct prog_ctx *prog,
+	char *path
+	)
 {
 	struct stat s;
 
@@ -319,7 +341,10 @@ state_open(struct prog_ctx *prog, char *path)
  *  -1 - Failure
  */
 static int
-state_save(struct prog_ctx *prog, struct nyetpci_ctx *pci)
+state_save(
+	struct prog_ctx *prog,
+	struct nyetpci_ctx *pci
+	)
 {
 	if (state_open(prog, prog->a_savefile) < 0) {
 		return (-1);
@@ -409,7 +434,10 @@ noext:
  *  -1 - Failure
  */
 static int
-state_load(struct prog_ctx *prog, struct nyetpci_ctx *pci)
+state_load(
+	struct prog_ctx *prog,
+	struct nyetpci_ctx *pci
+	)
 {
 	if (state_open(prog, prog->a_savefile) < 0) {
 		return (-1);
@@ -545,8 +573,12 @@ state_load(struct prog_ctx *prog, struct nyetpci_ctx *pci)
  *  -1 - Failure
  */
 static int
-parse_prog_args(struct prog_ctx *prog, struct nyetpci_ctx *pci,
-	int argc, char *argv[])
+parse_prog_args(
+	struct prog_ctx *prog,
+	struct nyetpci_ctx *pci,
+	int argc,
+	char *argv[]
+	)
 {
 	if (argc < 2) {
 		usage(prog->name, 0);
@@ -687,7 +719,10 @@ parse_prog_args(struct prog_ctx *prog, struct nyetpci_ctx *pci,
  * Main
  */
 int
-main(int argc, char *argv[])
+main(
+	int argc,
+	char *argv[]
+	)
 {
 	struct nyetpci_ctx pci = {0};
 	struct prog_ctx prog = {0};
