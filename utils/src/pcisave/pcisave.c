@@ -109,7 +109,7 @@ usage(
 "  $ %s load -evd pci0:40:0:0 /tmp/gpu.state\n"
 "\n"
 "  Skip restoring BARs for a device where it causes issues\n"
-"  $ %s load -vd pci0:5:0:0 -n 10,14,18,1C,20,24 ./device.state\n"
+"  $ %s load -vd pci0:5:0:0 -n 10,14,18,1C,20,24,30 ./device.state\n"
 "\n"
 "  Only restore one specific extended config space address\n"
 "  $ %s load -evd pci0:31:0:0 -y 216 ./device.state\n"

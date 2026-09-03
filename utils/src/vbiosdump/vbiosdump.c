@@ -49,7 +49,10 @@ struct prog_ctx {
 /* Generic dumper context */
 struct dctx_generic {
 	/* BAR base */
-	volatile void *base;
+	void *base;
+
+	/* BAR length */
+	size_t len;
 };
 
 /*
@@ -71,26 +74,20 @@ usage(
 "  -d device  PCI selector (same form as pciconf(8), e.g. 'pci0:5:0:0')\n"
 "  -b bar     Use the specified BAR for dumping instead of the default one\n"
 "             If 0x30 is specified, use a (mostly) GPU-agnostic dump method\n"
-"               through the expansion ROM BAR (requires /dev/mem access)\n"
+"               through the expansion ROM BAR\n"
 "\n"
 "This program automatically saves the VBIOS ROM of the selected GPU as a file\n"
 "  ready to use for GPU passthrough.\n"
-"There are some limitations like highly limited iGPU support, untested IFR\n"
-"  parsing (Nvidia A100 datacenter accelerators w/o display engine) and\n"
-"  reliance on /dev/mem for legacy AMD GPU ROM dumping support.\n"
-"Currently, this tool is only available for FreeBSD.\n"
+"There are some limitations like highly limited iGPU support.\n"
 "\n"
 "Examples:"
-"  Dump the VBIOS of a GPU to stdout, driver name in selector\n"
-"  $ %s -d vgapci0@pci0:1:0:0 -\n"
+"  Dump the VBIOS of a GPU to stdout\n"
+"  $ %s -d pci0:1:0:0 -\n"
 "\n"
 "  Dump the VBIOS of a GPU using expansion ROM BAR\n"
 "  $ %s -d pci0:1:0:0 -b 0x30 vbios.rom\n"
-"\n"
-"  Dump the VBIOS of a GPU using an MMIO BAR at 0x20, mmap through /dev/mem\n"
-"  $ %s -d pci0:1:0:0 -b 0x20 -u vbios.rom\n"
 "",
-			name, name, name);
+			name, name);
 	}
 
 	exit(EXIT_FAILURE);
@@ -101,10 +98,10 @@ prog_free(
 	struct prog_ctx *prog
 	)
 {
-        if (prog->vbios_fp != NULL) {
+	if (prog->vbios_fp != NULL) {
 		fclose(prog->vbios_fp);
 		prog->vbios_fp = NULL;
-        }
+	}
 
 	if (prog->vbios_data) {
 		free(prog->vbios_data);
@@ -161,7 +158,7 @@ open_file_write(
 static void *
 mmap_paddr(
 	uint64_t paddr,
-	uint64_t len,
+	size_t len,
 	int rw
 	)
 {
@@ -182,7 +179,282 @@ mmap_paddr(
 }
 
 /*
+ * Is [off, off + len) inside readable memory?
+ */
+static int
+rom_in_range(
+	uint64_t bound,
+	uint64_t off,
+	size_t len
+	)
+{
+	if (bound == 0) {
+		return (1);
+	}
+
+	return ((off <= bound) && (len <= (bound - off)));
+}
+
+/*
+ * (Helper) Read from raw mmapped memory
+ *
+ * Reads cannot go over dctx.length
+ * Cannot fully read a mapping that's not aligned to uint32_t
+ */
+static void
+h_raw_rom_read(
+	void *dctx,
+	void *data,
+	size_t data_len,
+	uint32_t off
+	)
+{
+	volatile void *base = ((struct dctx_generic *)dctx)->base;
+	size_t len = ((struct dctx_generic *)dctx)->len;
+	uint32_t i = 0;
+
+	/* Read most in 32-bit chunks */
+	while ((i + 4 <= data_len) && (off + i + 4 <= len)) {
+		uint32_t chunk = MMIO_R32(base, off + i);
+		memcpy((uint8_t *)data + i, &chunk, sizeof(uint32_t));
+		i += sizeof(uint32_t);
+	}
+
+	/* Finish off the tail */
+	if ((i < data_len) && (off + i + 4 <= len)) {
+		uint32_t chunk = MMIO_R32(base, off + i);
+		memcpy((uint8_t *)data + i, &chunk, data_len - i);
+		i = (uint32_t)data_len;
+	}
+
+	/* Clean everything OOB */
+	if (i < data_len) {
+		LOGV("Got 0x%02zX OOB bytes", data_len - i);
+		memset((uint8_t *)data + i, 0xFF, data_len - i);
+	}
+}
+
+/*
+ * (Helper) Read AMDGPU (SOC15+) ROM
+ */
+static void
+h_amd_rom_read(
+	void *dctx,
+	void *data,
+	size_t data_len,
+	uint32_t off
+	)
+{
+	volatile void *base = ((struct dctx_generic *)dctx)->base;
+	uint32_t i = 0;
+
+	/* "Hi, I would like to begin reading from here." */
+	MMIO_W32(base, IOREG_AMD_ROM_INDEX, off);
+
+	/* Read most in 32-bit chunks */
+	while (i + 4 <= data_len) {
+		uint32_t chunk = MMIO_R32(base, IOREG_AMD_ROM_DATA);
+		memcpy((uint8_t *)data + i, &chunk, sizeof(uint32_t));
+		i += sizeof(uint32_t);
+	}
+
+	/* Finish off the tail */
+	if (i < data_len) {
+		uint32_t chunk = MMIO_R32(base, IOREG_AMD_ROM_DATA);
+		memcpy((uint8_t *)data + i, &chunk, data_len - i);
+	}
+}
+
+/*
+ * (Helper) Initialize Intel dGPU ROM and find the OpROM region
+ */
+static void
+h_intel_rom_init(
+	volatile void *base,
+	uint32_t *off
+	)
+{
+	LOG("Initializing Intel SPI");
+
+	/* Find region with VBIOS */
+	uint32_t region = MMIO_R32(base, IOREG_INTEL_GET_REGION) &
+		MASK_INTEL_ROM_REGION;
+
+	/* Select it */
+	MMIO_W32(base, IOREG_INTEL_SEL_REGION, region);
+
+	/* Offset to VBIOS start in that region */
+	*off = MMIO_R32(base, IOREG_INTEL_GET_ROM_OFF) & MASK_INTEL_ROM_OFFSET;
+}
+
+/*
+ * (Helper) Read Intel dGPU ROM
+ */
+static void
+h_intel_rom_read(
+	void *dctx,
+	void *data,
+	size_t data_len,
+	uint32_t off
+	)
+{
+	volatile void *base = ((struct dctx_generic *)dctx)->base;
+	uint32_t i = 0;
+
+	/* Read most in 32-bit chunks */
+	while (i + 4 <= data_len) {
+		/* Ask for an address */
+		MMIO_W32(base, IOREG_INTEL_SEL_ADDR, off + i);
+
+		/* Read the return */
+		uint32_t chunk = MMIO_R32(base, IOREG_INTEL_READ_ADDR);
+
+		memcpy((uint8_t *)data + i, &chunk, sizeof(uint32_t));
+		i += sizeof(uint32_t);
+	}
+
+	/* Finish off the tail */
+	if (i < data_len) {
+		MMIO_W32(base, IOREG_INTEL_SEL_ADDR, off + i);
+		uint32_t chunk = MMIO_R32(base, IOREG_INTEL_READ_ADDR);
+		memcpy((uint8_t *)data + i, &chunk, data_len - i);
+	}
+}
+
+
+/*
+ * Validate one OpROM image at the offset and grab its PCIR
+ *
+ * Returns:
+ *   0 - Success, PCIR filled in
+ *  -1 - Error
+ */
+static int
+vbiosdump_walk_image(
+	void *dctx,
+	void (*h_read) (
+		void *dctx,
+		void *data,
+		size_t data_len,
+		uint32_t off
+		),
+	uint32_t bound,
+	uint32_t off,
+	struct oprom_pcir *pcir
+	)
+{
+	uint16_t pcir_off;
+	uint32_t hdr_size;
+
+	uint8_t peek[8]; /* magic + size + efi magic */
+
+	if (!rom_in_range(bound, off, sizeof(peek))) {
+		fprintf(stderr, "OpROM header: Outside mapped region\n");
+		return (-1);
+	}
+	h_read(dctx, peek, sizeof(peek), off);
+
+	if ((peek[0] != 0x55) || (peek[1] != 0xAA)) {
+		fprintf(stderr, "OpROM header: Invalid magic\n");
+
+		/* Most iGPUs keep the VBIOS inside firmware */
+		if (h_read == h_intel_rom_read) {
+			fprintf(stderr, "This is likely a mobile GPU\n");
+		}
+		return (-1);
+	}
+
+	/*
+	 * Dumb split since EFI size entry covers the first
+	 *   legacy init vector byte
+	 */
+	if ((peek[4] == 0xF1) && (peek[5] == 0x0E) && (peek[6] == 0x00) &&
+		(peek[7] == 0x00)) {
+
+		struct oprom_hdr_efi hdr;
+
+		if (!rom_in_range(bound, off, sizeof(hdr))) {
+			fprintf(stderr, "OpROM header: Outside mapped "
+				"region\n");
+			return (-1);
+		}
+		h_read(dctx, &hdr, sizeof(hdr), off);
+
+		if (hdr.pcir_off == 0) {
+			fprintf(stderr, "OpROM header: Invalid PCIR offset\n");
+			return (-1);
+		}
+
+		pcir_off = hdr.pcir_off;
+		hdr_size = hdr.size;
+	} else {
+		struct oprom_hdr_legacy hdr;
+
+		if (!rom_in_range(bound, off, sizeof(hdr))) {
+			fprintf(stderr, "OpROM header: Outside mapped "
+				"region\n");
+			return (-1);
+		}
+		h_read(dctx, &hdr, sizeof(hdr), off);
+
+		if (hdr.pcir_off == 0) {
+			fprintf(stderr, "OpROM header: Invalid PCIR offset\n");
+			return (-1);
+		}
+
+		if ((hdr.init_vector[0] == 0x00) &&
+			(hdr.init_vector[1] == 0x00) &&
+			(hdr.init_vector[2] == 0x00)) {
+
+			fprintf(stderr, "OpROM header: Legacy image without "
+				"init vector, stub?\n");
+			return (-1);
+		}
+
+		pcir_off = hdr.pcir_off;
+		hdr_size = hdr.size;
+	}
+
+	/* PCIR has to fit in the size the header says */
+	if ((size_t)pcir_off + sizeof(struct oprom_pcir) >
+		(size_t)hdr_size * 512) {
+
+		fprintf(stderr, "OpROM header: PCIR outside the image "
+			"bounds\n");
+		return (-1);
+	}
+
+	/* Also in the mmap of course */
+	if (!rom_in_range(bound, (uint64_t)off + pcir_off,
+		sizeof(struct oprom_pcir))) {
+
+		fprintf(stderr, "OpROM header: PCIR outside mapped region\n");
+		return (-1);
+	}
+	h_read(dctx, pcir, sizeof(*pcir), off + pcir_off);
+
+	if (memcmp(pcir->magic, "PCIR", 4) != 0) {
+		fprintf(stderr, "PCIR header: Invalid magic\n");
+		return (-1);
+	}
+
+	if (pcir->image_len == 0) {
+		fprintf(stderr, "PCIR header: Zero image length\n");
+		return (-1);
+	}
+
+	if (hdr_size != pcir->image_len) {
+		LOGV("Image size mismatch between header (%u) and PCIR (%u), "
+			"using PCIR", hdr_size, pcir->image_len);
+	}
+
+	return (0);
+}
+
+/*
  * Walk the ROM and dump it to prog->vbios_data provided a read function
+ *
+ * bound is a maximum, pass 0 if the reader only uses fixed registers
  *
  * Returns:
  *   0 - Success
@@ -193,11 +465,11 @@ vbiosdump_walk_rom(
 	struct prog_ctx *prog,
 	uint32_t off_initial,
 	void *dctx,
-	void (*h_read)
-		(
+	uint32_t bound,
+	void (*h_read) (
 		void *dctx,
 		void *data,
-		size_t len,
+		size_t data_len,
 		uint32_t off
 		)
 	)
@@ -207,7 +479,6 @@ vbiosdump_walk_rom(
 
 	/* Scan headers and calculate image size */
 	while (1) {
-		struct oprom_hdr_efi hdr;
 		struct oprom_pcir pcir;
 		size_t image_bytes;
 
@@ -215,56 +486,58 @@ vbiosdump_walk_rom(
 			fprintf(stderr, "Image split at 0x%04X\n", off);
 		}
 
-		if (off > MAX_VBIOS_SIZE) {
-			fprintf(stderr, "%s: Image chain longer than max "
-				"VBIOS size", prog->name);
-			return (-1);
+		if (vbiosdump_walk_image(dctx, h_read, bound, off,
+			&pcir) < 0) {
+
+			/* The first chain entry has to be valid */
+			if (alloc_size == 0) {
+				return (-1);
+			}
+
+			/* Failed later - padding? */
+			uint32_t scan;
+			int found = 0;
+
+			for (scan = off + 0x100;
+				scan < off_initial + MAX_VBIOS_SIZE;
+				scan += 0x100) {
+
+				uint8_t m[2];
+				if (!rom_in_range(bound, scan,
+					sizeof(m))) {
+					break;
+				}
+
+				h_read(dctx, m, sizeof(m), scan);
+				if ((m[0] == 0x55) && (m[1] == 0xAA)) {
+					off = scan;
+					found = 1;
+					break;
+				}
+			}
+
+			if (!found) {
+				fprintf(stderr, "OpROM chain broke at 0x%04X\n",
+					off);
+				return (-1);
+			}
+
+			continue;
 		}
 
-		/* Grab header, use the EFI struct because it doesn't matter */
-		h_read(dctx, &hdr, sizeof(struct oprom_hdr_efi), off);
-
-		/* Verify magic number */
-		if (hdr.magic[0] != 0x55 || hdr.magic[1] != 0xAA) {
-			fprintf(stderr, "%s: OpROM magic missmatch "
-				"(expected 0x55AA, got 0x%02X%02X)\n",
-				prog->name, hdr.magic[0], hdr.magic[1]);
-
-			return (-1);
-		}
-
-		/* Grab PCIR */
-		h_read(dctx, &pcir, sizeof(struct oprom_pcir),
-			off + hdr.pcir_off);
-
-		if (memcmp(pcir.magic, "PCIR", 4) != 0) {
-			fprintf(stderr, "%s: PCIR magic missmatch "
-				"(expected 'PCIR', got '%c%c%c%c')\n",
-				prog->name, pcir.magic[0], pcir.magic[1],
-				pcir.magic[2], pcir.magic[3]);
-			return (-1);
-		}
-
-		/* Sanity check */
-		if (pcir.image_len == 0) {
-			fprintf(stderr, "%s: PCIR reports zero image "
-				"length, corrupt ROM?\n", prog->name);
-			return (-1);
-		}
-
-		image_bytes = pcir.image_len * 512;
+		image_bytes = (size_t)pcir.image_len * 512;
 
 		/* Check for overflow */
 		if (alloc_size + image_bytes > MAX_VBIOS_SIZE) {
-			fprintf(stderr, "%s: VBIOS size exceeds set limit "
-				"(%ub)\n", prog->name, MAX_VBIOS_SIZE);
+			fprintf(stderr, "VBIOS size exceeds set limit "
+				"(%ub)\n", MAX_VBIOS_SIZE);
 			return (-1);
 		}
 
 		alloc_size += image_bytes;
-		off = off_initial + alloc_size;
+		off = off_initial + (uint32_t)alloc_size;
 
-		if (pcir.image_is_last & 0x80) {
+		if (pcir.indicator & 0x80) {
 			break;
 		}
 	}
@@ -276,38 +549,17 @@ vbiosdump_walk_rom(
 		return (-1);
 	}
 
+	if (!rom_in_range(bound, off_initial, alloc_size)) {
+		fprintf(stderr, "VBIOS goes outside the allowed region\n");
+		free(prog->vbios_data);
+		prog->vbios_data = NULL;
+		return (-1);
+	}
+
 	prog->vbios_len = alloc_size;
 	h_read(dctx, prog->vbios_data, alloc_size, off_initial);
 
 	return (0);
-}
-
-/*
- * Read helper - Read from raw mmapped memory
- */
-static void
-h_raw_rom_read(
-	void *dctx,
-	void *data,
-	size_t len,
-	uint32_t off
-	)
-{
-	volatile void *base = ((struct dctx_generic *)dctx)->base;
-	uint32_t i = 0;
-
-	/* Read most as 32-bit */
-	while (i + 4 <= len) {
-		uint32_t chunk = MMIO_R32(base, off + i);
-		memcpy((uint8_t *)data + i, &chunk, sizeof(uint32_t));
-		i += sizeof(uint32_t);
-	}
-
-	/* Finish off tail as a single OOB-not access */
-	if (i < len) {
-		uint32_t chunk = MMIO_R32(base, off + i);
-		memcpy((uint8_t *)data + i, &chunk, len - i);
-	}
 }
 
 /*
@@ -324,73 +576,238 @@ vbiosdump_ebar(
 	)
 {
 	LOG("Dumping through expansion ROM BAR");
+	struct dctx_generic dctx = {0};
+	int ret = -1;
 
-	uint64_t bar_len;
-	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, 0x30, &bar_len);
+	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, 0x30, &dctx.len);
 	if (bar_paddr == 0) {
-		fprintf(stderr, "%s: No expansion ROM BAR\n", prog->name);
-		return (-1);
+		fprintf(stderr, "No BAR\n");
+		goto exit;
 	}
 
-	uint8_t *bar_base = mmap_paddr(bar_paddr, bar_len, 1);
-	if (bar_base == NULL) {
+	dctx.base = mmap_paddr(bar_paddr, dctx.len, 1);
+	if (dctx.base == NULL) {
 		perror("mmap_paddr()");
 		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
-		return (-1);
+		goto exit;
 	}
 
-	struct dctx_generic dctx;
-	dctx.base = bar_base;
+	uint32_t bound = (dctx.len > UINT32_MAX ?
+		UINT32_MAX : (uint32_t)dctx.len);
 
 	LOG("Walking ROM");
-	if (vbiosdump_walk_rom(prog, 0, &dctx, h_raw_rom_read) < 0) {
+	if (vbiosdump_walk_rom(prog, 0, &dctx, bound, h_raw_rom_read) < 0) {
+		goto exit;
+	}
+
+	ret = 0;
+exit:
+	if ((dctx.base != NULL) && (munmap(dctx.base, dctx.len) < 0)) {
+		fprintf(stderr, "%s: Failure munmapping BAR\n", prog->name);
 		return (-1);
 	}
 
-	return (0);
+	return (ret);
 }
 
 /*
- * Stubs
+ * Dumper for Nvidia
+ *
+ * Returns:
+ *   0 - Success
+ *  -1 - Failure
  */
-
 static int
 vbiosdump_nvidia_main(
 	struct prog_ctx *prog,
 	struct nyetpci_ctx *pci
 	)
 {
-	(void)prog;
-	(void)pci;
-	fprintf(stderr, "nvidia stub\n");
+	LOG("Dumping for NVIDIA");
+	struct dctx_generic dctx = {0};
 
-	return (-1);
+	uint64_t bar_len;
+	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, prog->opbar, &bar_len);
+	if (bar_paddr == 0) {
+		fprintf(stderr, "%s: No BAR\n", prog->name);
+		goto error;
+	} else if (bar_len > UINT32_MAX) {
+		fprintf(stderr, "Warning: BAR larger than 4 GiB\n");
+		bar_len = UINT32_MAX;
+	}
+
+	dctx.len = bar_len;
+
+	/* Check if the BAR is too short */
+	if (dctx.len - 4 < IOREG_NVIDIA_SPI_OFF) {
+		fprintf(stderr, "BAR too small, trying expansion ROM BAR "
+			"as fallback\n");
+
+		return (vbiosdump_ebar(prog, pci));
+	}
+
+	dctx.base = mmap_paddr(bar_paddr, bar_len, 1);
+	if (dctx.base == NULL) {
+		perror("mmap_paddr()");
+		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
+		return (-1);
+	}
+
+	fprintf(stderr, "Scanning BAR for an OpROM...\n");
+	uint32_t o = IOREG_NVIDIA_SPI_OFF;
+	int success = 0;
+
+	for (;o < IOREG_NVIDIA_SPI_OFF + IOREG_NVIDIA_SPI_SIZE; o += 0x100) {
+		if (MMIO_R8(dctx.base, o + 0) == 0x55 &&
+			MMIO_R8(dctx.base, o + 1) == 0xAA) {
+
+			fprintf(stderr, "Trying 0x%X\n", o);
+			if (vbiosdump_walk_rom(prog, o, &dctx,
+				IOREG_NVIDIA_SPI_OFF + IOREG_NVIDIA_SPI_SIZE,
+				h_raw_rom_read) < 0) {
+
+				continue;
+			}
+
+			success = 1;
+			break;
+		}
+	}
+
+	if (munmap(dctx.base, dctx.len) < 0) {
+		fprintf(stderr, "%s: Failure munmapping BAR\n",
+			prog->name);
+		return (-1);
+	}
+
+	if (success) {
+		return (0);
+	}
+
+error:
+	fprintf(stderr, "Trying expansion ROM BAR as fallback\n");
+
+	return (vbiosdump_ebar(prog, pci));
 }
 
+/*
+ * Dumper for AMD (SOC15+)
+ *
+ * Returns:
+ *   0 - Success
+ *  -1 - Failure
+ */
 static int
 vbiosdump_amd_main(
 	struct prog_ctx *prog,
 	struct nyetpci_ctx *pci
 	)
 {
-	(void)prog;
-	(void)pci;
-	fprintf(stderr, "amd stub\n");
+	LOG("Dumping for AMD");
+	struct dctx_generic dctx = {0};
+	int ret = -1;
 
-	return (-1);
+	uint64_t bar_len;
+	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, prog->opbar, &bar_len);
+	if (bar_paddr == 0) {
+		fprintf(stderr, "%s: No BAR\n", prog->name);
+		goto exit;
+	} else if (bar_len > UINT32_MAX) {
+		fprintf(stderr, "Warning: BAR larger than 4 GiB\n");
+		bar_len = UINT32_MAX;
+	}
+
+	/* Check if the BAR is too small for the access regsistrers */
+	if (bar_len - 4 < IOREG_AMD_ROM_DATA) {
+		fprintf(stderr, "BAR too small, trying expansion ROM BAR "
+			"as fallback\n");
+		return (vbiosdump_ebar(prog, pci));
+	}
+
+	dctx.len = bar_len;
+	dctx.base = mmap_paddr(bar_paddr, bar_len, 1);
+	if (dctx.base == NULL) {
+		perror("mmap_paddr()");
+		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
+		goto exit;
+	}
+
+	/* Access fixed to two registers, unbound */
+	LOG("Walking ROM");
+	if (vbiosdump_walk_rom(prog, 0, &dctx, 0, h_amd_rom_read) < 0) {
+		goto exit;
+	}
+
+	ret = 0;
+exit:
+	if ((dctx.base != NULL) && (munmap(dctx.base, dctx.len) < 0)) {
+		fprintf(stderr, "%s: Failure munmapping BAR\n", prog->name);
+		return (-1);
+	}
+
+	return (ret);
 }
 
+/*
+ * Dumper for Intel (ARC) dGPUs
+ *
+ * Returns:
+ *   0 - Success
+ *  -1 - Failure
+ */
 static int
 vbiosdump_intel_main(
 	struct prog_ctx *prog,
 	struct nyetpci_ctx *pci
 	)
 {
-	(void)prog;
-	(void)pci;
-	fprintf(stderr, "intel stub\n");
+	LOG("Dumping for Intel");
+	struct dctx_generic dctx = {0};
+	int ret = -1;
 
-	return (-1);
+	uint64_t bar_len;
+	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, prog->opbar, &bar_len);
+	if (bar_paddr == 0) {
+		fprintf(stderr, "%s: No BAR\n", prog->name);
+		goto exit;
+	} else if (bar_len > UINT32_MAX) {
+		fprintf(stderr, "Warning: BAR larger than 4 GiB\n");
+		bar_len = UINT32_MAX;
+	}
+
+	/* Check if the BAR is too small for the access regsistrers */
+	if (bar_len - 4 < IOREG_INTEL_GET_ROM_OFF) {
+		fprintf(stderr, "BAR too small, trying expansion ROM BAR "
+			"as fallback\n");
+		return (vbiosdump_ebar(prog, pci));
+	}
+
+	dctx.len = bar_len;
+	dctx.base = mmap_paddr(bar_paddr, bar_len, 1);
+	if (dctx.base == NULL) {
+		perror("mmap_paddr()");
+		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
+		goto exit;
+	}
+
+	uint32_t off;
+	h_intel_rom_init(dctx.base, &off);
+	LOGV("Offset to VBIOS: 0x%X", off);
+
+	/* Access fixed to a bit more registers, still unbound */
+	LOG("Walking ROM");
+	if (vbiosdump_walk_rom(prog, off, &dctx, 0, h_intel_rom_read) < 0) {
+		goto exit;
+	}
+
+	ret = 0;
+exit:
+	if ((dctx.base != NULL) && (munmap(dctx.base, dctx.len) < 0)) {
+		fprintf(stderr, "%s: Failure munmapping BAR\n", prog->name);
+		return (-1);
+	}
+
+	return (ret);
 }
 
 /*
@@ -449,7 +866,7 @@ vbiosdump_main(
 			}
 			LOG("BAR is Prefetchable");
 forend:
-			fprintf(stderr, "BAR 0x%02X not MMIO, trying "
+			fprintf(stderr, "BAR 0x%02X not fitting, trying "
 				"next one\n", bar);
 		}
 	}
@@ -493,8 +910,6 @@ forend:
 	}
 
 	return (r);
-
-#undef DEFAULT_OPBAR
 }
 
 /*

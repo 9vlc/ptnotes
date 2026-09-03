@@ -33,53 +33,28 @@
 #define IOREG_AMD_ROM_INDEX	0x5A0A0 /* Select ROM index */
 #define IOREG_AMD_ROM_DATA	0x5A0A4 /* Read ROM */
 
-/* Nvidia GPU MMIO ROM offset */
-#define IOREG_NVIDIA_ROM_OFFSET	0x300000 /* ROM located directly over here */
+/* Nvidia GPU MMIO SPI offset; OpROM not always in the beginning */
+#define IOREG_NVIDIA_SPI_OFF	0x300000
+#define IOREG_NVIDIA_SPI_SIZE	0x100000
 
 /*
  * Structs
  */
 
 #pragma pack(push, 1)
-/* Nvidia IFR */
-struct ifr_hdr {
-	/* 0x00; "NVGI" / 0x4947564E */
-	uint32_t magic;
-
-	/*
-	 * 0x04; Bitfield
-	 * 31    - reserved
-	 * 30:16 - fixed_data_size
-	 * 15:8  - version
-	 * 7:0   - reserved
-	 */
-	uint32_t fixed1;
-
-	/*
-	 * 0x08; Bitfield
-	 * 31    - reserved
-	 * 30:20 - reserved, zero
-	 * 19:0  - total_data_size
-	 */
-	uint32_t fixed2;
-};
-#define IFR_FIXED_DATA_SIZE(F1)	(((F1) >> 16) & 0x7FFF)
-#define IFR_VERSION(F1)		(((F1) >> 8) & 0xFF)
-#define IFR_TOTAL_DATA_SIZE(F2)	((F2) & 0xFFFFF)
-
 /* Legacy BIOS OpROM */
 struct oprom_hdr_legacy {
 	/* 0x00; 55 AA */
 	uint8_t magic[2];
 
-	/* 0x02; Image runtime size in 512-byte chunks */
-	uint8_t init_size;
+	/* 0x02; Image size in 512-byte chunks including header */
+	uint8_t size;
 
-	/* 0x03; X86 Init vector */
-	uint8_t init_vector[4];
+	/* 0x03; x86 Init entry point (jump to actual code) */
+	uint8_t init_vector[3];
 
-	/* 0x07; Reserved */
-	uint8_t reserved1[17];
+	/* 0x06; Reserved */
+	uint8_t reserved1[18];
 
 	/* 0x18; Offset to PCIR structure */
 	uint16_t pcir_off;
@@ -92,8 +67,8 @@ struct oprom_hdr_efi {
 	/* 0x00; 55 AA */
 	uint8_t magic[2];
 
-	/* 0x02; Legacy image runtime size in 512-byte chunks */
-	uint16_t init_size;
+	/* 0x02; Image size in 512-byte chunks including header */
+	uint16_t size;
 
 	/* 0x04; 0x0EF1 */
 	uint32_t efi_magic;
@@ -152,7 +127,7 @@ struct oprom_pcir {
 	uint8_t image_type;
 
 	/* 0x15; Bit 7; (this & 0x80) == Last image in the ROM */
-	uint8_t image_is_last;
+	uint8_t indicator;
 
 	/* 0x16; Amount of runtime (after init) memory this image needs */
 	uint16_t max_runtime_size;
