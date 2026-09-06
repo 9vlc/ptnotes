@@ -356,11 +356,6 @@ vbiosdump_walk_image(
 
 	if ((peek[0] != 0x55) || (peek[1] != 0xAA)) {
 		fprintf(stderr, "OpROM header: Invalid magic\n");
-
-		/* Most iGPUs keep the VBIOS inside firmware */
-		if (h_read == h_intel_rom_read) {
-			fprintf(stderr, "This is likely a mobile GPU\n");
-		}
 		return (-1);
 	}
 
@@ -398,7 +393,8 @@ vbiosdump_walk_image(
 		h_read(dctx, &hdr, sizeof(hdr), off);
 
 		if (hdr.pcir_off == 0) {
-			fprintf(stderr, "OpROM header: Invalid PCIR offset\n");
+			fprintf(stderr, "OpROM header: Invalid PCIR offset: "
+				"0x%04X\n", hdr.pcir_off);
 			return (-1);
 		}
 
@@ -406,25 +402,27 @@ vbiosdump_walk_image(
 			(hdr.init_vector[1] == 0x00) &&
 			(hdr.init_vector[2] == 0x00)) {
 
-			fprintf(stderr, "OpROM header: Legacy image without "
-				"init vector, stub?\n");
-			return (-1);
+			LOG("OpROM header: Legacy image without init vector, "
+				"stub?");
 		}
 
 		pcir_off = hdr.pcir_off;
 		hdr_size = hdr.size;
 	}
 
-	/* PCIR has to fit in the size the header says */
-	if ((size_t)pcir_off + sizeof(struct oprom_pcir) >
+	/*
+	 * Technically a good idea, but Nvidia's newer images have OpROM's size
+	 *   field zeroed out but still point to a PCIR, which contains a
+	 *   proper size field.
+	 */
+	/*if ((size_t)pcir_off + sizeof(struct oprom_pcir) >
 		(size_t)hdr_size * 512) {
 
 		fprintf(stderr, "OpROM header: PCIR outside the image "
-			"bounds\n");
+			"bounds (offset 0x%04X)\n", pcir_off);
 		return (-1);
-	}
+	}*/
 
-	/* Also in the mmap of course */
 	if (!rom_in_range(bound, (uint64_t)off + pcir_off,
 		sizeof(struct oprom_pcir))) {
 
@@ -517,10 +515,11 @@ vbiosdump_walk_rom(
 			}
 
 			if (!found) {
-				fprintf(stderr, "OpROM chain broke at 0x%04X\n",
-					off);
-				return (-1);
+				fprintf(stderr, "OpROM chain broke at 0x%04X "
+					"without last image indicator\n", off);
+				break;
 			}
+			alloc_size = (size_t)(off - off_initial);
 
 			continue;
 		}
@@ -1054,7 +1053,7 @@ main(
 	}
 
 	if (prog.vbios_data == NULL) {
-		fprintf(stderr, "%s: VBIOS never got fetched\n",
+		fprintf(stderr, "%s: VBIOS never got fetched?\n",
 			prog.name);
 		goto exit;
 	}
@@ -1083,6 +1082,10 @@ main(
 
 	ret = EXIT_SUCCESS;
 exit:
+	if (ret == EXIT_FAILURE) {
+		fprintf(stderr, "%s: Failed to dump VBIOS\n", prog.name);
+	}
+
 	(void)nyetpci_free(&pci);
 	prog_free(&prog);
 	return (ret);

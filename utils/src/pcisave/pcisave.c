@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <string.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -409,7 +410,7 @@ noext:
 			CFG_EXT_MASK_SZ - CFG_MASK_SZ);
 	}
 
-	/* Checksum */
+	state.checksum = 0;
 	uint32_t crc = UINT32_MAX;
 	for (uint32_t i = 0; i < sizeof(struct pci_save); i++) {
 		crc = crc32_step(crc, ((uint8_t *)&state)[i]);
@@ -463,6 +464,7 @@ state_load(
 		return (-1);
 	}
 
+	state.checksum = 0;
 	uint32_t crc = UINT32_MAX;
 	for (uint32_t i = 0; i < sizeof(struct pci_save); i++) {
 		crc = crc32_step(crc, ((uint8_t *)&state)[i]);
