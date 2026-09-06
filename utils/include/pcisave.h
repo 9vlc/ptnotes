@@ -6,6 +6,8 @@
 #ifndef _PCISAVE_H
 #define _PCISAVE_H
 
+#include <stdint.h>
+
 #define CFG_SZ		(256)
 #define CFG_MASK_SZ	(CFG_SZ / 8 / 4)
 #define CFG_EXT_SZ	(4096)

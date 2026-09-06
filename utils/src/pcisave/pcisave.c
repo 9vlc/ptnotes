@@ -464,6 +464,7 @@ state_load(
 		return (-1);
 	}
 
+	uint32_t state_crc = state.checksum;
 	state.checksum = 0;
 	uint32_t crc = UINT32_MAX;
 	for (uint32_t i = 0; i < sizeof(struct pci_save); i++) {
@@ -471,7 +472,7 @@ state_load(
 	}
 	crc ^= UINT32_MAX;
 
-	if (state.checksum != crc) {
+	if (state_crc != crc) {
 		fprintf(stderr, "%s: Invalid savefile checksum\n", prog->name);
 		return (-1);
 	}
@@ -539,7 +540,7 @@ state_load(
 			uint32_t dw_cfg,
 				 dw_pci;
 
-			if (!mask_get(state.config_mask, i)) {
+			if (!mask_get(state.config_mask, i / 4)) {
 				continue;
 			}
 
