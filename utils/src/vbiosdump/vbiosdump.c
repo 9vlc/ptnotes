@@ -1,6 +1,10 @@
 /*
  * SPDX-License-Identifier: BSD-3-Clause
  * Copyright (c) 2026 Alexey Laurentsyeu <alex@paidbsd.org>
+ *
+ * This is a tool for dumping GPU's VBIOS for passthrough.
+ * The produced images in a lot of the cases are stripped.
+ * DO NOT USE THIS TOOL FOR ROM BACKUPS!
  */
 
 #include <sys/stat.h>
@@ -38,6 +42,9 @@ struct prog_ctx {
 	/* Are we outputing to stdout? */
 	int flag_stdout;
 
+	/* Are we doing a full chain dump ? */
+	int flag_fullchain;
+
 	/* Operation BAR override */
 	int opbar;
 
@@ -66,11 +73,12 @@ usage(
 	int full
 	)
 {
-	fprintf(stderr, "usage: %s -d device [-b bar] [-u] vbios.rom\n", name);
+	fprintf(stderr, "usage: %s -d device [-b bar] [-a] vbios.rom\n", name);
 	if (full) {
 		fprintf(stderr,
 "\n"
 "Options:\n"
+"  -a         Dump the full image chain including stubs\n"
 "  -d device  PCI selector (same form as pciconf(8), e.g. 'pci0:5:0:0')\n"
 "  -b bar     Use the specified BAR for dumping instead of the default one\n"
 "             If 0x30 is specified, use a (mostly) GPU-agnostic dump method\n"
@@ -321,7 +329,6 @@ h_intel_rom_read(
 	}
 }
 
-
 /*
  * Validate one OpROM image at the offset and grab its PCIR
  *
@@ -340,7 +347,8 @@ vbiosdump_walk_image(
 		),
 	uint32_t bound,
 	uint32_t off,
-	struct oprom_pcir *pcir
+	struct oprom_pcir *pcir,
+	int fullchain
 	)
 {
 	uint16_t pcir_off;
@@ -404,6 +412,10 @@ vbiosdump_walk_image(
 
 			LOG("OpROM header: Legacy image without init vector, "
 				"stub?");
+
+			if (!fullchain) {
+				return (-1);
+			}
 		}
 
 		pcir_off = hdr.pcir_off;
@@ -485,7 +497,7 @@ vbiosdump_walk_rom(
 		}
 
 		if (vbiosdump_walk_image(dctx, h_read, bound, off,
-			&pcir) < 0) {
+			&pcir, prog->flag_fullchain) < 0) {
 
 			/* The first chain entry has to be valid */
 			if (alloc_size == 0) {
@@ -588,7 +600,7 @@ vbiosdump_ebar(
 	if (dctx.base == NULL) {
 		perror("mmap_paddr()");
 		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
-		goto exit;
+		return (-1);
 	}
 
 	uint32_t bound = (dctx.len > UINT32_MAX ?
@@ -629,7 +641,7 @@ vbiosdump_nvidia_main(
 	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, prog->opbar, &bar_len);
 	if (bar_paddr == 0) {
 		fprintf(stderr, "%s: No BAR\n", prog->name);
-		goto error;
+		goto ebar;
 	} else if (bar_len > UINT32_MAX) {
 		fprintf(stderr, "Warning: BAR larger than 4 GiB\n");
 		bar_len = UINT32_MAX;
@@ -637,12 +649,9 @@ vbiosdump_nvidia_main(
 
 	dctx.len = bar_len;
 
-	/* Check if the BAR is too short */
 	if (dctx.len - 4 < IOREG_NVIDIA_SPI_OFF) {
-		fprintf(stderr, "BAR too small, trying expansion ROM BAR "
-			"as fallback\n");
-
-		return (vbiosdump_ebar(prog, pci));
+		fprintf(stderr, "BAR too small\n");
+		goto ebar;
 	}
 
 	dctx.base = mmap_paddr(bar_paddr, bar_len, 1);
@@ -652,11 +661,13 @@ vbiosdump_nvidia_main(
 		return (-1);
 	}
 
-	fprintf(stderr, "Scanning BAR for an OpROM...\n");
-	uint32_t o = IOREG_NVIDIA_SPI_OFF;
+	fprintf(stderr, "Scanning ROM...\n");
 	int success = 0;
 
-	for (;o < IOREG_NVIDIA_SPI_OFF + IOREG_NVIDIA_SPI_SIZE; o += 0x100) {
+	for (uint32_t o = IOREG_NVIDIA_SPI_OFF;
+		o < IOREG_NVIDIA_SPI_OFF + IOREG_NVIDIA_SPI_SIZE;
+		o += 0x100) {
+
 		if (MMIO_R8(dctx.base, o + 0) == 0x55 &&
 			MMIO_R8(dctx.base, o + 1) == 0xAA) {
 
@@ -674,8 +685,7 @@ vbiosdump_nvidia_main(
 	}
 
 	if (munmap(dctx.base, dctx.len) < 0) {
-		fprintf(stderr, "%s: Failure munmapping BAR\n",
-			prog->name);
+		fprintf(stderr, "%s: Failure munmapping BAR\n", prog->name);
 		return (-1);
 	}
 
@@ -683,9 +693,8 @@ vbiosdump_nvidia_main(
 		return (0);
 	}
 
-error:
+ebar:
 	fprintf(stderr, "Trying expansion ROM BAR as fallback\n");
-
 	return (vbiosdump_ebar(prog, pci));
 }
 
@@ -704,13 +713,12 @@ vbiosdump_amd_main(
 {
 	LOG("Dumping for AMD");
 	struct dctx_generic dctx = {0};
-	int ret = -1;
 
 	uint64_t bar_len;
 	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, prog->opbar, &bar_len);
 	if (bar_paddr == 0) {
 		fprintf(stderr, "%s: No BAR\n", prog->name);
-		goto exit;
+		goto ebar;
 	} else if (bar_len > UINT32_MAX) {
 		fprintf(stderr, "Warning: BAR larger than 4 GiB\n");
 		bar_len = UINT32_MAX;
@@ -718,9 +726,8 @@ vbiosdump_amd_main(
 
 	/* Check if the BAR is too small for the access regsistrers */
 	if (bar_len - 4 < IOREG_AMD_ROM_DATA) {
-		fprintf(stderr, "BAR too small, trying expansion ROM BAR "
-			"as fallback\n");
-		return (vbiosdump_ebar(prog, pci));
+		fprintf(stderr, "BAR too small\n");
+		goto ebar;
 	}
 
 	dctx.len = bar_len;
@@ -728,23 +735,42 @@ vbiosdump_amd_main(
 	if (dctx.base == NULL) {
 		perror("mmap_paddr()");
 		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
-		goto exit;
+		return (-1);
 	}
 
-	/* Access fixed to two registers, unbound */
-	LOG("Walking ROM");
-	if (vbiosdump_walk_rom(prog, 0, &dctx, 0, h_amd_rom_read) < 0) {
-		goto exit;
+	fprintf(stderr, "Scanning ROM...\n");
+	int success = 0;
+
+	/* Limit to 512 KiB */
+	for (uint32_t o = 0; o < 0x80000; o += 0x100) {
+		uint8_t sig[2];
+		h_amd_rom_read(&dctx, sig, 2, o);
+
+		if (sig[0] == 0x55 && sig[1] == 0xAA) {
+			fprintf(stderr, "Trying 0x%X\n", o);
+			if (vbiosdump_walk_rom(prog, o, &dctx, 0,
+				h_amd_rom_read) < 0) {
+
+				continue;
+			}
+
+			success = 1;
+			break;
+		}
 	}
 
-	ret = 0;
-exit:
-	if ((dctx.base != NULL) && (munmap(dctx.base, dctx.len) < 0)) {
+	if (munmap(dctx.base, dctx.len) < 0) {
 		fprintf(stderr, "%s: Failure munmapping BAR\n", prog->name);
 		return (-1);
 	}
 
-	return (ret);
+	if (success) {
+		return (0);
+	}
+
+ebar:
+	fprintf(stderr, "Trying expansion ROM BAR as fallback\n");
+	return (vbiosdump_ebar(prog, pci));
 }
 
 /*
@@ -762,13 +788,12 @@ vbiosdump_intel_main(
 {
 	LOG("Dumping for Intel");
 	struct dctx_generic dctx = {0};
-	int ret = -1;
 
 	uint64_t bar_len;
 	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, prog->opbar, &bar_len);
 	if (bar_paddr == 0) {
 		fprintf(stderr, "%s: No BAR\n", prog->name);
-		goto exit;
+		goto ebar;
 	} else if (bar_len > UINT32_MAX) {
 		fprintf(stderr, "Warning: BAR larger than 4 GiB\n");
 		bar_len = UINT32_MAX;
@@ -776,9 +801,8 @@ vbiosdump_intel_main(
 
 	/* Check if the BAR is too small for the access regsistrers */
 	if (bar_len - 4 < IOREG_INTEL_GET_ROM_OFF) {
-		fprintf(stderr, "BAR too small, trying expansion ROM BAR "
-			"as fallback\n");
-		return (vbiosdump_ebar(prog, pci));
+		fprintf(stderr, "BAR too small\n");
+		goto ebar;
 	}
 
 	dctx.len = bar_len;
@@ -786,27 +810,46 @@ vbiosdump_intel_main(
 	if (dctx.base == NULL) {
 		perror("mmap_paddr()");
 		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
-		goto exit;
+		return (-1);
 	}
 
 	uint32_t off;
 	h_intel_rom_init(dctx.base, &off);
 	LOGV("Offset to VBIOS: 0x%X", off);
 
-	/* Access fixed to a bit more registers, still unbound */
-	LOG("Walking ROM");
-	if (vbiosdump_walk_rom(prog, off, &dctx, 0, h_intel_rom_read) < 0) {
-		goto exit;
+	fprintf(stderr, "Scanning ROM...\n");
+	int success = 0;
+
+	/* Limit to 512 KiB */
+	for (uint32_t o = off; o < off + 0x80000; o += 0x100) {
+		uint8_t sig[2];
+		h_intel_rom_read(&dctx, sig, 2, o);
+
+		if (sig[0] == 0x55 && sig[1] == 0xAA) {
+			fprintf(stderr, "Trying 0x%X\n", o);
+			if (vbiosdump_walk_rom(prog, o, &dctx, 0,
+				h_intel_rom_read) < 0) {
+
+				continue;
+			}
+
+			success = 1;
+			break;
+		}
 	}
 
-	ret = 0;
-exit:
-	if ((dctx.base != NULL) && (munmap(dctx.base, dctx.len) < 0)) {
+	if (munmap(dctx.base, dctx.len) < 0) {
 		fprintf(stderr, "%s: Failure munmapping BAR\n", prog->name);
 		return (-1);
 	}
 
-	return (ret);
+	if (success) {
+		return (0);
+	}
+
+ebar:
+	fprintf(stderr, "Trying expansion ROM BAR as fallback\n");
+	return (vbiosdump_ebar(prog, pci));
 }
 
 /*
@@ -931,10 +974,14 @@ parse_prog_args(
 	}
 
 	int ch;
-	while ((ch = getopt(argc, argv, "hb:d:")) != -1) {
+	while ((ch = getopt(argc, argv, "hab:d:")) != -1) {
 		switch (ch) {
 		case 'h':
 			usage(prog->name, 1);
+			break;
+
+		case 'a':
+			prog->flag_fullchain = 1;
 			break;
 
 		case 'b':
