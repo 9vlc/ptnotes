@@ -3,43 +3,10 @@
  * Copyright (c) 2026 Alexey Laurentsyeu <alex@paidbsd.org>
  */
 
-#ifndef _VBIOSDUMP_H
-#define _VBIOSDUMP_H
+#ifndef _OPROM_H
+#define _OPROM_H
 
-#define MAX_VBIOS_SIZE 1024 * 1024 * 10
-
-#define MMIO_R8(B, O)     (*(volatile uint8_t *)((uint8_t *)(B) + (O)))
-#define MMIO_R16(B, O)    (*(volatile uint16_t *)((uint8_t *)(B) + (O)))
-#define MMIO_R32(B, O)    (*(volatile uint32_t *)((uint8_t *)(B) + (O)))
-#define MMIO_R64(B, O)    (*(volatile uint64_t *)((uint8_t *)(B) + (O)))
-
-#define MMIO_W8(B, O, V)  (*(volatile uint8_t *)((uint8_t *)(B) + (O))) = (V)
-#define MMIO_W16(B, O, V) (*(volatile uint16_t *)((uint8_t *)(B) + (O))) = (V)
-#define MMIO_W32(B, O, V) (*(volatile uint32_t *)((uint8_t *)(B) + (O))) = (V)
-#define MMIO_W64(B, O, V) (*(volatile uint64_t *)((uint8_t *)(B) + (O))) = (V)
-
-/* Intel dGPU MMIO registers */
-#define IOREG_INTEL_GET_REGION	0x102090 /* Get ROM regions */
-#define IOREG_INTEL_SEL_REGION	0x102084 /* Select ROM region */
-#define IOREG_INTEL_GET_ROM_OFF	0x1020C0 /* Get OpROM offset in region */
-#define IOREG_INTEL_SEL_ADDR	0x102080 /* Offset to read */
-#define IOREG_INTEL_READ_ADDR	0x102040 /* Returned read DWORD */
-
-/* Intel masks */
-#define MASK_INTEL_ROM_REGION	0xFF
-#define MASK_INTEL_ROM_OFFSET	0x1F0000
-
-/* AMD GPU MMIO registers for SOC15+ */
-#define IOREG_AMD_ROM_INDEX	0x5A0A0 /* Select ROM index */
-#define IOREG_AMD_ROM_DATA	0x5A0A4 /* Read ROM */
-
-/* Nvidia GPU MMIO SPI offset; OpROM not always in the beginning */
-#define IOREG_NVIDIA_SPI_OFF	0x300000
-#define IOREG_NVIDIA_SPI_SIZE	0x100000
-
-/*
- * Structs
- */
+#include <stdint.h>
 
 #pragma pack(push, 1)
 /* Legacy BIOS OpROM */
@@ -166,4 +133,4 @@ enum pcir_image_type {
 	PCIR_IMAGE_EFI = 0x03
 };
 
-#endif /* _VBIOSDUMP_H */
+#endif /* _OPROM_H */

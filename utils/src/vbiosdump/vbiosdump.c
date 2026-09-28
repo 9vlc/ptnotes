@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 
+#include <err.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -17,24 +18,55 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-#include <debug.h>
-#include <vbiosdump.h>
+#include <mmio.h>
+#include <oprom.h>
 #include <nyetpci.h>
 
-/*
- * Structs
- */
+#define MAX_VBIOS_SIZE 1024 * 1024 * 10
+
+/* Intel dGPU MMIO registers */
+#define IOREG_INTEL_GET_REGION	0x102090 /* Get ROM regions */
+#define IOREG_INTEL_SEL_REGION	0x102084 /* Select ROM region */
+#define IOREG_INTEL_GET_ROM_OFF	0x1020C0 /* Get OpROM offset in region */
+#define IOREG_INTEL_SEL_ADDR	0x102080 /* Offset to read */
+#define IOREG_INTEL_READ_ADDR	0x102040 /* Returned read DWORD */
+
+/* Intel masks */
+#define MASK_INTEL_ROM_REGION	0xFF
+#define MASK_INTEL_ROM_OFFSET	0x1F0000
+
+/* AMD GPU MMIO registers for SOC15+ */
+#define IOREG_AMD_ROM_INDEX	0x5A0A0 /* Select ROM index */
+#define IOREG_AMD_ROM_DATA	0x5A0A4 /* Read ROM */
+
+/* Nvidia GPU MMIO SPI offset; OpROM not always in the beginning */
+#define IOREG_NVIDIA_SPI_OFF	0x300000
+#define IOREG_NVIDIA_SPI_SIZE	0x100000
+
+static int vflag = 0;
+
+#define LOG(STR) do { \
+	if (vflag) { \
+		fprintf(stderr, STR"\n"); \
+	} \
+} while (0)
+
+#define LOGV(FMT, ...) do { \
+	if (vflag) { \
+		fprintf(stderr, FMT"\n", __VA_ARGS__); \
+	} \
+} while (0)
 
 /* Program context */
 struct prog_ctx {
-	/* Executable name */
-	char *name;
-
 	/* GPU selector */
-	char *a_device;
+	const char *a_device;
+
+	/* ROM to trim path */
+	const char *a_trim_path;
 
 	/* VBIOS output file path */
-	char *vbios_path;
+	const char *vbios_path;
 
 	/* VBIOS output file pointer */
 	FILE *vbios_fp;
@@ -62,6 +94,12 @@ struct dctx_generic {
 	size_t len;
 };
 
+/* For extracting VBIOS from a dirty ROM file */
+struct dctx_file {
+	FILE *fp;
+	size_t len;
+};
+
 /*
  * Print usage
  *
@@ -69,33 +107,40 @@ struct dctx_generic {
  */
 static void
 usage(
-	const char *name,
 	int full
 	)
 {
-	fprintf(stderr, "usage: %s -d device [-b bar] [-a] vbios.rom\n", name);
+	const char *name = getprogname();
+
+	fprintf(stderr, "usage: %s -d device [-v] [-b bar] [-a] vbios.rom\n"
+			"       %s -r dirty.rom [-v] [-a] vbios.rom\n",
+		name, name);
 	if (full) {
 		fprintf(stderr,
 "\n"
 "Options:\n"
-"  -a         Dump the full image chain including stubs\n"
-"  -d device  PCI selector (same form as pciconf(8), e.g. 'pci0:5:0:0')\n"
-"  -b bar     Use the specified BAR for dumping instead of the default one\n"
-"             If 0x30 is specified, use a (mostly) GPU-agnostic dump method\n"
-"               through the expansion ROM BAR\n"
+"  -a          Dump the full image chain including stubs\n"
+"  -d device   PCI selector (same form as pciconf(8), e.g. 'pci0:5:0:0')\n"
+"  -r bad.rom  Read from a dirty ROM file and extract VBIOS out of it\n"
+"  -b bar      Use the specified BAR for dumping instead of the default one\n"
+"              If 0x30 is specified, use a (mostly) GPU-agnostic dump method\n"
+"                through the expansion ROM BAR\n"
 "\n"
 "This program automatically saves the VBIOS ROM of the selected GPU as a file\n"
 "  ready to use for GPU passthrough.\n"
 "There are some limitations like highly limited iGPU support.\n"
 "\n"
-"Examples:"
+"Examples:\n"
 "  Dump the VBIOS of a GPU to stdout\n"
 "  $ %s -d pci0:1:0:0 -\n"
 "\n"
 "  Dump the VBIOS of a GPU using expansion ROM BAR\n"
 "  $ %s -d pci0:1:0:0 -b 0x30 vbios.rom\n"
+"\n"
+"  Carve out the first found VBIOS from a dirty ROM dump file\n"
+"  $ %s -r dirty.rom clean.rom\n"
 "",
-			name, name);
+			name, name, name);
 	}
 
 	exit(EXIT_FAILURE);
@@ -127,29 +172,25 @@ prog_free(
 static int
 open_file_write(
 	struct prog_ctx *prog,
-	char *path
+	const char *path
 	)
 {
 	struct stat s;
 
 	if (stat(path, &s) == 0) {
 		if (!S_ISREG(s.st_mode)) {
-			fprintf(stderr, "%s: Output exists and is not a "
-				"regular file\n", prog->name);
+			warnx("%s: not a regular file", path);
 			return (-1);
 		}
-	} else if (errno == ENOENT) {
-		errno = 0;
-	} else {
-		perror("stat()");
+	} else if (errno != ENOENT) {
+		warn("%s", path);
 		return (-1);
 	}
 
-	LOGV("Opening '%s' for writing", path);
 	prog->vbios_fp = fopen(path, "wb");
 
 	if (prog->vbios_fp == NULL) {
-		perror("fopen()");
+		warn("fopen");
 		return (-1);
 	}
 
@@ -176,7 +217,7 @@ mmap_paddr(
 	}
 
 	void *base = mmap(NULL, len, (rw ? PROT_READ | PROT_WRITE : PROT_READ),
-		MAP_SHARED | MAP_NOCORE, memfd, paddr);
+		MAP_SHARED, memfd, paddr);
 
 	if (base == MAP_FAILED) {
 		base = NULL;
@@ -240,6 +281,30 @@ h_raw_rom_read(
 		LOGV("Got 0x%02zX OOB bytes", data_len - i);
 		memset((uint8_t *)data + i, 0xFF, data_len - i);
 	}
+}
+
+/*
+ * (Helper) Read from an open file descriptor
+ */
+static void
+h_file_rom_read(
+	void *dctx,
+	void *data,
+	size_t data_len,
+	uint32_t off
+	)
+{
+	FILE *fp = ((struct dctx_file *)dctx)->fp;
+	size_t len = ((struct dctx_file *)dctx)->len;
+
+	/* No way of reporting error back to walker, discard it */
+
+	if (fseek(fp, off, SEEK_SET) < 0) {
+		return;
+	} else if (data_len > len) {
+		data_len = len;
+	}
+	(void)fread(data, data_len, 1, fp);
 }
 
 /*
@@ -357,13 +422,13 @@ vbiosdump_walk_image(
 	uint8_t peek[8]; /* magic + size + efi magic */
 
 	if (!rom_in_range(bound, off, sizeof(peek))) {
-		fprintf(stderr, "OpROM header: Outside mapped region\n");
+		LOG("OPROM header: outside mapped region");
 		return (-1);
 	}
 	h_read(dctx, peek, sizeof(peek), off);
 
 	if ((peek[0] != 0x55) || (peek[1] != 0xAA)) {
-		fprintf(stderr, "OpROM header: Invalid magic\n");
+		LOG("OPROM header: invalid magic");
 		return (-1);
 	}
 
@@ -377,14 +442,13 @@ vbiosdump_walk_image(
 		struct oprom_hdr_efi hdr;
 
 		if (!rom_in_range(bound, off, sizeof(hdr))) {
-			fprintf(stderr, "OpROM header: Outside mapped "
-				"region\n");
+			LOG("OPROM header: outside mapped region");
 			return (-1);
 		}
 		h_read(dctx, &hdr, sizeof(hdr), off);
 
 		if (hdr.pcir_off == 0) {
-			fprintf(stderr, "OpROM header: Invalid PCIR offset\n");
+			LOG("OPROM header: invalid PCIR offset");
 			return (-1);
 		}
 
@@ -394,15 +458,14 @@ vbiosdump_walk_image(
 		struct oprom_hdr_legacy hdr;
 
 		if (!rom_in_range(bound, off, sizeof(hdr))) {
-			fprintf(stderr, "OpROM header: Outside mapped "
-				"region\n");
+			LOG("OPROM header: outside mapped region");
 			return (-1);
 		}
 		h_read(dctx, &hdr, sizeof(hdr), off);
 
 		if (hdr.pcir_off == 0) {
-			fprintf(stderr, "OpROM header: Invalid PCIR offset: "
-				"0x%04X\n", hdr.pcir_off);
+			LOGV("OPROM header: invalid PCIR offset: 0x%04X",
+				hdr.pcir_off);
 			return (-1);
 		}
 
@@ -410,7 +473,7 @@ vbiosdump_walk_image(
 			(hdr.init_vector[1] == 0x00) &&
 			(hdr.init_vector[2] == 0x00)) {
 
-			LOG("OpROM header: Legacy image without init vector, "
+			LOG("OPROM header: legacy image without init vector, "
 				"stub?");
 
 			if (!fullchain) {
@@ -422,34 +485,21 @@ vbiosdump_walk_image(
 		hdr_size = hdr.size;
 	}
 
-	/*
-	 * Technically a good idea, but Nvidia's newer images have OpROM's size
-	 *   field zeroed out but still point to a PCIR, which contains a
-	 *   proper size field.
-	 */
-	/*if ((size_t)pcir_off + sizeof(struct oprom_pcir) >
-		(size_t)hdr_size * 512) {
-
-		fprintf(stderr, "OpROM header: PCIR outside the image "
-			"bounds (offset 0x%04X)\n", pcir_off);
-		return (-1);
-	}*/
-
 	if (!rom_in_range(bound, (uint64_t)off + pcir_off,
 		sizeof(struct oprom_pcir))) {
 
-		fprintf(stderr, "OpROM header: PCIR outside mapped region\n");
+		LOG("OPROM header: PCIR outside mapped region");
 		return (-1);
 	}
 	h_read(dctx, pcir, sizeof(*pcir), off + pcir_off);
 
 	if (memcmp(pcir->magic, "PCIR", 4) != 0) {
-		fprintf(stderr, "PCIR header: Invalid magic\n");
+		LOG("PCIR header: invalid magic");
 		return (-1);
 	}
 
 	if (pcir->image_len == 0) {
-		fprintf(stderr, "PCIR header: Zero image length\n");
+		LOG("PCIR header: zero image length");
 		return (-1);
 	}
 
@@ -493,7 +543,7 @@ vbiosdump_walk_rom(
 		size_t image_bytes;
 
 		if (off > off_initial) {
-			fprintf(stderr, "Image split at 0x%04X\n", off);
+			LOGV("Image split at 0x%04X", off);
 		}
 
 		if (vbiosdump_walk_image(dctx, h_read, bound, off,
@@ -527,8 +577,8 @@ vbiosdump_walk_rom(
 			}
 
 			if (!found) {
-				fprintf(stderr, "OpROM chain broke at 0x%04X "
-					"without last image indicator\n", off);
+				warnx("OPROM chain broke at 0x%04X without "
+					"last image indicator", off);
 				break;
 			}
 			alloc_size = (size_t)(off - off_initial);
@@ -540,8 +590,8 @@ vbiosdump_walk_rom(
 
 		/* Check for overflow */
 		if (alloc_size + image_bytes > MAX_VBIOS_SIZE) {
-			fprintf(stderr, "VBIOS size exceeds set limit "
-				"(%ub)\n", MAX_VBIOS_SIZE);
+			warnx("VBIOS size exceeds set limit (%ub)",
+				MAX_VBIOS_SIZE);
 			return (-1);
 		}
 
@@ -561,7 +611,7 @@ vbiosdump_walk_rom(
 	}
 
 	if (!rom_in_range(bound, off_initial, alloc_size)) {
-		fprintf(stderr, "VBIOS goes outside the allowed region\n");
+		warnx("VBIOS not in range");
 		free(prog->vbios_data);
 		prog->vbios_data = NULL;
 		return (-1);
@@ -571,6 +621,79 @@ vbiosdump_walk_rom(
 	h_read(dctx, prog->vbios_data, alloc_size, off_initial);
 
 	return (0);
+}
+
+/*
+ * Generic dumper through a file @ a_trim_path
+ *
+ * Returns:
+ *   0 - Success
+ *  -1 - Failure
+ */
+static int
+vbiosdump_file(
+	struct prog_ctx *prog
+	)
+{
+	LOG("Dumping from file");
+	struct dctx_file dctx = {0};
+	int ret = -1;
+
+	struct stat s;
+
+	if (stat(prog->a_trim_path, &s) == 0) {
+		if (!S_ISREG(s.st_mode)) {
+			warnx("%s: not a regular file", prog->a_trim_path);
+			goto exit;
+		}
+	} else {
+		warn("%s", prog->a_trim_path);
+		goto exit;
+	}
+
+	if ((dctx.fp = fopen(prog->a_trim_path, "rb")) == NULL) {
+		warn("fopen");
+		goto exit;
+	}
+
+	if (fseek(dctx.fp, 0, SEEK_END) < 0) {
+		warn("fseek");
+		goto exit;
+	}
+	dctx.len = ftell(dctx.fp);
+	rewind(dctx.fp);
+
+	if (dctx.len > UINT32_MAX) {
+		warnx("%s: file larger than 4 GiB", prog->a_trim_path);
+		goto exit;
+	}
+
+	/* Walk the entire file byte by byte, there might not be alignment */
+	for (uint32_t o = 0; o < dctx.len; o ++) {
+		uint8_t sig[2];
+		h_file_rom_read(&dctx, sig, 2, o);
+
+		if (sig[0] == 0x55 && sig[1] == 0xAA) {
+			LOGV("Trying 0x%X", o);
+			if (vbiosdump_walk_rom(prog, o, &dctx, dctx.len,
+				h_file_rom_read) < 0) {
+
+				continue;
+			}
+
+			ret = 0;
+			break;
+		}
+	}
+
+exit:
+	if (dctx.fp != NULL) {
+		if (fclose(dctx.fp) < 0) {
+			warn("fclose");
+			return (-1);
+		}
+	}
+	return (ret);
 }
 
 /*
@@ -592,29 +715,27 @@ vbiosdump_ebar(
 
 	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, 0x30, &dctx.len);
 	if (bar_paddr == 0) {
-		fprintf(stderr, "No BAR\n");
-		goto exit;
+		warnx("BAR 0x30 is invalid");
+		return (-1);
+	} else if (dctx.len > UINT32_MAX) {
+		warnx("BAR 0x30 cannot be larger than 4 GiB");
+		return (-1);
 	}
 
 	dctx.base = mmap_paddr(bar_paddr, dctx.len, 1);
 	if (dctx.base == NULL) {
-		perror("mmap_paddr()");
-		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
+		warn("mmap BAR 0x30");
 		return (-1);
 	}
 
-	uint32_t bound = (dctx.len > UINT32_MAX ?
-		UINT32_MAX : (uint32_t)dctx.len);
-
-	LOG("Walking ROM");
-	if (vbiosdump_walk_rom(prog, 0, &dctx, bound, h_raw_rom_read) < 0) {
+	if (vbiosdump_walk_rom(prog, 0, &dctx, dctx.len, h_raw_rom_read) < 0) {
 		goto exit;
 	}
 
 	ret = 0;
 exit:
-	if ((dctx.base != NULL) && (munmap(dctx.base, dctx.len) < 0)) {
-		fprintf(stderr, "%s: Failure munmapping BAR\n", prog->name);
+	if (dctx.base != NULL && munmap(dctx.base, dctx.len) < 0) {
+		warn("munmap BAR 0x%02X", prog->opbar);
 		return (-1);
 	}
 
@@ -640,28 +761,27 @@ vbiosdump_nvidia_main(
 	uint64_t bar_len;
 	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, prog->opbar, &bar_len);
 	if (bar_paddr == 0) {
-		fprintf(stderr, "%s: No BAR\n", prog->name);
+		warnx("BAR 0x%02X is invalid", prog->opbar);
 		goto ebar;
 	} else if (bar_len > UINT32_MAX) {
-		fprintf(stderr, "Warning: BAR larger than 4 GiB\n");
+		warnx("BAR 0x%02X larger than 4 GiB", prog->opbar);
 		bar_len = UINT32_MAX;
 	}
 
 	dctx.len = bar_len;
 
-	if (dctx.len - 4 < IOREG_NVIDIA_SPI_OFF) {
-		fprintf(stderr, "BAR too small\n");
+	if (dctx.len < IOREG_NVIDIA_SPI_OFF + IOREG_NVIDIA_SPI_SIZE / 4) {
+		warnx("BAR 0x%02X too small for ROM", prog->opbar);
 		goto ebar;
 	}
 
 	dctx.base = mmap_paddr(bar_paddr, bar_len, 1);
 	if (dctx.base == NULL) {
-		perror("mmap_paddr()");
-		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
+		warn("mmap BAR 0x%02X", prog->opbar);
 		return (-1);
 	}
 
-	fprintf(stderr, "Scanning ROM...\n");
+	LOG("Scanning ROM");
 	int success = 0;
 
 	for (uint32_t o = IOREG_NVIDIA_SPI_OFF;
@@ -671,7 +791,7 @@ vbiosdump_nvidia_main(
 		if (MMIO_R8(dctx.base, o + 0) == 0x55 &&
 			MMIO_R8(dctx.base, o + 1) == 0xAA) {
 
-			fprintf(stderr, "Trying 0x%X\n", o);
+			LOGV("Trying 0x%X", o);
 			if (vbiosdump_walk_rom(prog, o, &dctx,
 				IOREG_NVIDIA_SPI_OFF + IOREG_NVIDIA_SPI_SIZE,
 				h_raw_rom_read) < 0) {
@@ -685,7 +805,7 @@ vbiosdump_nvidia_main(
 	}
 
 	if (munmap(dctx.base, dctx.len) < 0) {
-		fprintf(stderr, "%s: Failure munmapping BAR\n", prog->name);
+		warn("munmap BAR 0x%02X", prog->opbar);
 		return (-1);
 	}
 
@@ -694,7 +814,7 @@ vbiosdump_nvidia_main(
 	}
 
 ebar:
-	fprintf(stderr, "Trying expansion ROM BAR as fallback\n");
+	LOG("Trying expansion ROM BAR as fallback");
 	return (vbiosdump_ebar(prog, pci));
 }
 
@@ -717,28 +837,27 @@ vbiosdump_amd_main(
 	uint64_t bar_len;
 	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, prog->opbar, &bar_len);
 	if (bar_paddr == 0) {
-		fprintf(stderr, "%s: No BAR\n", prog->name);
+		warnx("BAR 0x%02X is invalid", prog->opbar);
 		goto ebar;
 	} else if (bar_len > UINT32_MAX) {
-		fprintf(stderr, "Warning: BAR larger than 4 GiB\n");
+		warnx("BAR 0x%02X larger than 4 GiB", prog->opbar);
 		bar_len = UINT32_MAX;
 	}
 
 	/* Check if the BAR is too small for the access regsistrers */
 	if (bar_len - 4 < IOREG_AMD_ROM_DATA) {
-		fprintf(stderr, "BAR too small\n");
+		warnx("BAR 0x%02X too small for registers", prog->opbar);
 		goto ebar;
 	}
 
 	dctx.len = bar_len;
 	dctx.base = mmap_paddr(bar_paddr, bar_len, 1);
 	if (dctx.base == NULL) {
-		perror("mmap_paddr()");
-		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
+		warn("mmap BAR 0x%02X", prog->opbar);
 		return (-1);
 	}
 
-	fprintf(stderr, "Scanning ROM...\n");
+	LOG("Scanning ROM");
 	int success = 0;
 
 	/* Limit to 512 KiB */
@@ -747,7 +866,7 @@ vbiosdump_amd_main(
 		h_amd_rom_read(&dctx, sig, 2, o);
 
 		if (sig[0] == 0x55 && sig[1] == 0xAA) {
-			fprintf(stderr, "Trying 0x%X\n", o);
+			LOGV("Trying 0x%X", o);
 			if (vbiosdump_walk_rom(prog, o, &dctx, 0,
 				h_amd_rom_read) < 0) {
 
@@ -760,7 +879,7 @@ vbiosdump_amd_main(
 	}
 
 	if (munmap(dctx.base, dctx.len) < 0) {
-		fprintf(stderr, "%s: Failure munmapping BAR\n", prog->name);
+		warn("munmap BAR 0x%02X", prog->opbar);
 		return (-1);
 	}
 
@@ -769,7 +888,7 @@ vbiosdump_amd_main(
 	}
 
 ebar:
-	fprintf(stderr, "Trying expansion ROM BAR as fallback\n");
+	LOG("Trying expansion ROM BAR as fallback");
 	return (vbiosdump_ebar(prog, pci));
 }
 
@@ -792,24 +911,23 @@ vbiosdump_intel_main(
 	uint64_t bar_len;
 	uint64_t bar_paddr = nyetpci_bar_get_paddr(pci, prog->opbar, &bar_len);
 	if (bar_paddr == 0) {
-		fprintf(stderr, "%s: No BAR\n", prog->name);
+		warnx("BAR 0x%02X is invalid", prog->opbar);
 		goto ebar;
 	} else if (bar_len > UINT32_MAX) {
-		fprintf(stderr, "Warning: BAR larger than 4 GiB\n");
+		warnx("BAR 0x%02X larger than 4 GiB", prog->opbar);
 		bar_len = UINT32_MAX;
 	}
 
 	/* Check if the BAR is too small for the access regsistrers */
 	if (bar_len - 4 < IOREG_INTEL_GET_ROM_OFF) {
-		fprintf(stderr, "BAR too small\n");
+		warnx("BAR 0x%02X too small for registers", prog->opbar);
 		goto ebar;
 	}
 
 	dctx.len = bar_len;
 	dctx.base = mmap_paddr(bar_paddr, bar_len, 1);
 	if (dctx.base == NULL) {
-		perror("mmap_paddr()");
-		fprintf(stderr, "%s: Could not mmap BAR\n", prog->name);
+		warn("mmap BAR 0x%02X", prog->opbar);
 		return (-1);
 	}
 
@@ -817,7 +935,7 @@ vbiosdump_intel_main(
 	h_intel_rom_init(dctx.base, &off);
 	LOGV("Offset to VBIOS: 0x%X", off);
 
-	fprintf(stderr, "Scanning ROM...\n");
+	LOG("Scanning rom...");
 	int success = 0;
 
 	/* Limit to 512 KiB */
@@ -826,7 +944,7 @@ vbiosdump_intel_main(
 		h_intel_rom_read(&dctx, sig, 2, o);
 
 		if (sig[0] == 0x55 && sig[1] == 0xAA) {
-			fprintf(stderr, "Trying 0x%X\n", o);
+			LOGV("Trying 0x%X", o);
 			if (vbiosdump_walk_rom(prog, o, &dctx, 0,
 				h_intel_rom_read) < 0) {
 
@@ -839,7 +957,7 @@ vbiosdump_intel_main(
 	}
 
 	if (munmap(dctx.base, dctx.len) < 0) {
-		fprintf(stderr, "%s: Failure munmapping BAR\n", prog->name);
+		warn("munmap BAR 0x%02X", prog->opbar);
 		return (-1);
 	}
 
@@ -848,7 +966,7 @@ vbiosdump_intel_main(
 	}
 
 ebar:
-	fprintf(stderr, "Trying expansion ROM BAR as fallback\n");
+	LOG("Trying expansion ROM BAR as fallback");
 	return (vbiosdump_ebar(prog, pci));
 }
 
@@ -906,16 +1024,15 @@ vbiosdump_main(
 				prog->opbar = bar;
 				break;
 			}
-			LOG("BAR is Prefetchable");
+			LOG("BAR is prefetchable");
 forend:
-			fprintf(stderr, "BAR 0x%02X not fitting, trying "
-				"next one\n", bar);
+			LOGV("BAR 0x%02X not fitting, trying next one", bar);
 		}
 	}
 
 	/* If none was chosen */
 	if (prog->opbar == 0) {
-		fprintf(stderr, "Trying BAR 0x30 as last resort\n");
+		LOG("Trying BAR 0x30 as last resort");
 		prog->opbar = 0x30;
 	}
 
@@ -946,8 +1063,7 @@ forend:
 		break;
 
 	default:
-		fprintf(stderr, "%s: Unknown GPU vendor: 0x%04X\n",
-			prog->name, vendor);
+		warnx("unknown GPU vendor: 0x%04X", vendor);
 		return (-1);
 	}
 
@@ -970,18 +1086,26 @@ parse_prog_args(
 	)
 {
 	if (argc < 2) {
-		usage(prog->name, 0);
+		usage(0);
 	}
 
 	int ch;
-	while ((ch = getopt(argc, argv, "hab:d:")) != -1) {
+	while ((ch = getopt(argc, argv, "vhar:b:d:")) != -1) {
 		switch (ch) {
+		case 'v':
+			vflag = 1;
+			break;
+
 		case 'h':
-			usage(prog->name, 1);
+			usage(1);
 			break;
 
 		case 'a':
 			prog->flag_fullchain = 1;
+			break;
+
+		case 'r':
+			prog->a_trim_path = optarg;
 			break;
 
 		case 'b':
@@ -989,19 +1113,16 @@ parse_prog_args(
 			char *ep;
 			prog->opbar = strtoul(optarg, &ep, 16);
 			if (errno) {
-				fprintf(stderr, "%s: Invalid BAR: '%s'\n",
-					prog->name, optarg);
+				warn("strtoul");
 				return (-1);
 			} else if (prog->opbar < 0x10 ||
 				(prog->opbar > 0x24 && prog->opbar != 0x30)) {
 
-				fprintf(stderr, "%s: Provided BAR is "
-					"out of range, must be 0x10-0x24 or "
-					"0x30\n", prog->name);
+				warnx("provided BAR is out of range, must be "
+					"0x10-0x24 or 0x30");
 				return (-1);
 			} else if (prog->opbar % 4 != 0) {
-				fprintf(stderr, "%s: Provided BAR is not "
-					"aligned, try 0x%02X\n", prog->name,
+				warnx("provided BAR is not aligned, try 0x%02X",
 					prog->opbar - prog->opbar % 4);
 				return (-1);
 			}
@@ -1013,13 +1134,13 @@ parse_prog_args(
 			break;
 
 		default:
-			usage(prog->name, 0);
+			usage(0);
 		}
 	}
 
 	/* Fallback to stdout */
 	if (optind >= argc) {
-		fprintf(stderr, "%s: No output specified\n", prog->name);
+		warnx("no output specified");
 		return (-1);
 	} else {
 		prog->vbios_path = argv[optind++];
@@ -1032,17 +1153,26 @@ parse_prog_args(
 	}
 
 	if (optind != argc) {
-		fprintf(stderr, "%s: Trailing arguments after VBIOS\n",
-			prog->name);
-		usage(prog->name, 0);
-	} else if (prog->a_device == NULL) {
-		fprintf(stderr, "%s: No device specified\n", prog->name);
-		usage(prog->name, 0);
+		warnx("trailing arguments after VBIOS");
+		usage(0);
 	}
 
-	if (nyetpci_parse_sel(prog->a_device, &pci->sel) < 0) {
-		fprintf(stderr, "%s: Invalid device selector\n", prog->name);
-		return (-1);
+	if (prog->a_trim_path == NULL) {
+		if (prog->a_device == NULL) {
+			warnx("no device specified");
+			usage(0);
+		}
+
+		if (nyetpci_parse_sel(prog->a_device, &pci->sel) < 0) {
+			warnx("invalid device selector format, try "
+				"pci0:AA:BB:CC");
+			usage(0);
+		}
+	} else {
+		if (prog->a_device != NULL) {
+			warnx("must specify either -d or -r, but not both");
+			usage(0);
+		}
 	}
 
 	return (0);
@@ -1059,80 +1189,80 @@ main(
 {
 	struct nyetpci_ctx pci = {0};
 	struct prog_ctx prog = {0};
+	const char *on;
 	int ret = EXIT_FAILURE;
-
-	prog.name = argv[0];
+	int r;
 
 	if (parse_prog_args(&prog, &pci, argc, argv) < 0) {
-		goto exit;
+		return (EXIT_FAILURE);
 	}
 
-	if (nyetpci_init(&pci) < 0) {
-		perror("nyetpci_init()");
-		goto exit;
-	}
-
-	if (!nyetpci_device_exists(&pci)) {
-		fprintf(stderr, "%s: Device does not exist\n", prog.name);
-		goto exit;
-	}
-
-	int r;
-	if ((r = nyetpci_is_gpu(&pci)) < 1) {
-		if (r == 0) {
-			fprintf(stderr, "%s: Not a GPU\n", prog.name);
-		} else {
-			perror("nyetpci_is_gpu()");
-		}
-		goto exit;
-	}
-
-	if (prog.opbar == 0x30) {
-		LOG("Using expansion ROM BAR");
-		if (vbiosdump_ebar(&prog, &pci) < 0) {
-			goto exit;
-		}
+	if (prog.a_trim_path != NULL) {
+		r = vbiosdump_file(&prog);
 	} else {
-		LOG("Probing GPU");
-		if (vbiosdump_main(&prog, &pci) < 0) {
+		if (nyetpci_init(&pci) < 0) {
+			warnx("nyetpci_init failed");
 			goto exit;
 		}
+
+		if (!nyetpci_device_exists(&pci)) {
+			warnx("device '%s' does not exist", prog.a_device);
+			goto exit;
+		}
+
+		if ((r = nyetpci_is_gpu(&pci)) < 0) {
+			warn("nyetpci_is_gpu");
+			goto exit;
+		} else if (r == 0) {
+			warnx("device '%s' is not a GPU", prog.a_device);
+			goto exit;
+		}
+
+		if (prog.opbar == 0x30) {
+			r = vbiosdump_ebar(&prog, &pci);
+		} else {
+			r = vbiosdump_main(&prog, &pci);
+		}
+	}
+
+	if (r < 0) {
+		goto exit;
 	}
 
 	if (prog.vbios_data == NULL) {
-		fprintf(stderr, "%s: VBIOS never got fetched?\n",
-			prog.name);
+		warnx("internal error: dump without data");
 		goto exit;
 	}
 
 	if (prog.flag_stdout) {
 		prog.vbios_fp = stdout;
-	} else if (open_file_write(&prog, prog.vbios_path) < 0) {
+		on = "stdout";
+	} else {
+		if (open_file_write(&prog, prog.vbios_path) < 0) {
+			goto exit;
+		}
+		on = prog.vbios_path;
+	}
+
+	if (fwrite(prog.vbios_data, prog.vbios_len, 1, prog.vbios_fp) != 1 ||
+		fflush(prog.vbios_fp) != 0) {
+
+		warn("%s", on);
 		goto exit;
 	}
 
-	LOG("Writing");
-	if (fwrite(prog.vbios_data, prog.vbios_len, 1, prog.vbios_fp) != 1) {
-		fprintf(stderr, "%s: Error writing output\n", prog.name);
-		goto exit;
+	if (!prog.flag_stdout) {
+		r = fclose(prog.vbios_fp);
+		prog.vbios_fp = NULL;
+		if (r != 0) {
+			warn("%s", on);
+			goto exit;
+		}
 	}
 
-	/* Flush and check for error again */
-	LOG("Flushing output");
-	fflush(prog.vbios_fp);
-	if (ferror(prog.vbios_fp)) {
-		fprintf(stderr, "%s: Error writing output\n", prog.name);
-		goto exit;
-	}
-
-	fprintf(stderr, "VBIOS dumped successfully!\n");
-
+	LOG("VBIOS dumped successfully");
 	ret = EXIT_SUCCESS;
 exit:
-	if (ret == EXIT_FAILURE) {
-		fprintf(stderr, "%s: Failed to dump VBIOS\n", prog.name);
-	}
-
 	(void)nyetpci_free(&pci);
 	prog_free(&prog);
 	return (ret);

@@ -10,14 +10,14 @@
 #include <sys/stat.h>
 
 #include <ctype.h>
+#include <err.h>
 #include <errno.h>
-#include <string.h>
 #include <stddef.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
-#include <debug.h>
 #include <crc32.h>
 #include <pcisave.h>
 #include <nyetpci.h>
@@ -27,9 +27,6 @@
  */
 
 struct prog_ctx {
-	/* Executable name */
-	char *name;
-
 	/* State file pointer */
 	FILE *fp;
 
@@ -66,14 +63,15 @@ enum { MODE_INVALID, MODE_SAVE, MODE_LOAD };
 /*
  * Print program usage and exit
  *
- * If arg2 = 1, print full usage instructions
+ * If full = 1, print full usage instructions
  */
 static void
 usage(
-	const char *name,
 	const int full
 	)
 {
+	const char *name = getprogname();
+
 	fprintf(stderr,
 "usage: %s -h\n"
 "       %s save -d device [-e] [-n off,..] [-y off,..] savefile\n"
@@ -84,7 +82,7 @@ usage(
 	if (full) {
 		fprintf(stderr,
 "\n"
-"Actions:\n"/* Savefile header */
+"Actions:\n"
 "  save  Read config space from a device and save it to a file\n"
 "  load  Read a savefile and write a config space to a device\n"
 "\n"
@@ -125,7 +123,7 @@ usage(
 /*
  * Bitmask access functions
  *
- * Get, Set and Clear a bit at position i
+ * Get, set and clear a bit at position i
  */
 
 static inline int
@@ -181,12 +179,10 @@ prog_free(
 	struct prog_ctx *prog
 	)
 {
-	LOG("Freeing program context");
-
-        if (prog->fp != NULL) {
+	if (prog->fp != NULL) {
 		fclose(prog->fp);
 		prog->fp = NULL;
-        }
+	}
 
 	if (prog->nolist != NULL) {
 		free(prog->nolist);
@@ -220,23 +216,18 @@ parse_csx(
 
 	/* Validate beginning */
 	if (*cc == '\0') {
-		LOG("Empty list");
 		return (NULL);
 	} else if (*cc == ',') {
-		LOG("Early comma");
 		return (NULL);
 	} else if (!isxdigit((unsigned char)*cc)) {
-		LOGV("Not a hex digit: '%c'", *cc);
 		return (NULL);
 	}
 
 	/* Walk first time to check the correctness */
 	while ((cc = strchr(cc + 1, ',')) != NULL) {
 		if (cc[1] == '\0') {
-			LOG("Trailing comma");
 			return (NULL);
 		} else if (!isxdigit((unsigned char)cc[1])) {
-			LOGV("Not a hex digit: '%c'", cc[1]);
 			return (NULL);
 		}
 		nums++;
@@ -244,7 +235,7 @@ parse_csx(
 
 	uint16_t *xlist = calloc(nums, sizeof(uint16_t));
 	if (xlist == NULL) {
-		LOG("calloc() failed");
+		warn("calloc");
 		return (NULL);
 	}
 
@@ -255,11 +246,10 @@ parse_csx(
 		errno = 0;
 		unsigned long val = strtoul(cc, &cc, 16);
 		if (errno) {
-			LOG("strtoul() failed");
+			warn("strtoul");
 			free(xlist);
 			return (NULL);
 		} else if (val > UINT16_MAX) {
-			LOGV("Value out of range: %lu", val);
 			free(xlist);
 			return (NULL);
 		}
@@ -268,7 +258,6 @@ parse_csx(
 		if (*cc == '\0') {
 			break;
 		} else if (*cc != ',') {
-			LOGV("char != ',': '%c'", *cc);
 			free(xlist);
 			return (NULL);
 		}
@@ -279,6 +268,26 @@ parse_csx(
 
 	*outlen = (size_t)nums;
 	return (xlist);
+}
+
+/*
+ * Compute the CRC32 of a savefile state
+ *
+ * The checksum field must be zeroed by the caller
+ */
+static uint32_t
+state_crc32(
+	const struct pci_save *state
+	)
+{
+	const uint8_t *p = (const uint8_t *)state;
+	uint32_t crc = UINT32_MAX;
+
+	for (size_t i = 0; i < sizeof(struct pci_save); i++) {
+		crc = crc32_step(crc, p[i]);
+	}
+
+	return (crc ^ UINT32_MAX);
 }
 
 /*
@@ -300,34 +309,18 @@ state_open(
 
 	if (stat(path, &s) == 0) {
 		if (!S_ISREG(s.st_mode)) {
-			fprintf(stderr, "%s: Savestate is not a regular file\n",
-				prog->name);
+			warnx("%s: not a regular file", path);
 			return (-1);
 		}
-	} else if (errno == ENOENT) {
-		if (prog->mode == MODE_SAVE) {
-			/* fopen() creates a new file */
-			errno = 0;
-		} else {
-			fprintf(stderr, "%s: Savestate does not exist\n",
-				prog->name);
-			return (-1);
-		}
-	} else {
-		perror("stat()");
+	/* ENOENT is fine on save since fopen() creates a file */
+	} else if (errno != ENOENT || prog->mode != MODE_SAVE) {
+		warn("%s", path);
 		return (-1);
 	}
 
-	if (prog->mode == MODE_SAVE) {
-		LOGV("Opening '%s' for writing", path);
-		prog->fp = fopen(path, "wb");
-	} else {
-		LOGV("Opening '%s' for reading", path);
-		prog->fp = fopen(path, "rb");
-	}
-
+	prog->fp = fopen(path, prog->mode == MODE_SAVE ? "wb" : "rb");
 	if (prog->fp == NULL) {
-		perror("fopen()");
+		warn("%s", path);
 		return (-1);
 	}
 
@@ -361,12 +354,12 @@ state_save(
 		(nyetpci_get_subvendor(pci, &state.subvendor) < 0) ||
 		(nyetpci_get_subdevice(pci, &state.subdevice) < 0)) {
 
+		warnx("could not read PCI IDs from device");
 		return (-1);
 	}
 
 	if (prog->flag_validate) {
-		fprintf(stderr, "%s: Warning: validate flag ignored on save\n",
-			prog->name);
+		warnx("-v ignored on save");
 	}
 
 	if (prog->yeslist) {
@@ -386,8 +379,7 @@ state_save(
 	for (size_t i = 0; i < CFG_SZ; i += 4) {
 		uint32_t dw;
 		if (nyetpci_cfg_read(pci, i, 4, &dw) < 0) {
-			fprintf(stderr, "%s: Could not read config space at "
-				"0x%zX\n", prog->name, i);
+			warnx("could not read config space at 0x%zX", i);
 			return (-1);
 		}
 		memcpy(state.config + i, &dw, sizeof(uint32_t));
@@ -397,9 +389,9 @@ state_save(
 		for (size_t i = CFG_SZ; i < CFG_EXT_SZ; i += 4) {
 			uint32_t dw;
 			if (nyetpci_cfg_read(pci, i, 4, &dw) < 0) {
-				fprintf(stderr, "Only saving regular"
-					"config space\n");
-				errno = 0;
+				warnx("could not read extended config space at "
+					"0x%zX, only saving regular config "
+					"space", i);
 				goto noext;
 			}
 			memcpy(state.config + i, &dw, sizeof(uint32_t));
@@ -411,16 +403,10 @@ noext:
 	}
 
 	state.checksum = 0;
-	uint32_t crc = UINT32_MAX;
-	for (uint32_t i = 0; i < sizeof(struct pci_save); i++) {
-		crc = crc32_step(crc, ((uint8_t *)&state)[i]);
-	}
-	crc ^= UINT32_MAX;
-	state.checksum = crc;
+	state.checksum = state_crc32(&state);
 
 	if (fwrite(&state, sizeof(struct pci_save), 1, prog->fp) != 1) {
-		fprintf(stderr, "%s: Could not write header to savefile\n",
-			prog->name);
+		warn("%s", prog->a_savefile);
 		return (-1);
 	}
 
@@ -447,33 +433,32 @@ state_load(
 	struct pci_save state;
 
 	if (fread(&state, sizeof(struct pci_save), 1, prog->fp) != 1) {
-		fprintf(stderr, "%s: Could not read savefile\n", prog->name);
+		if (ferror(prog->fp)) {
+			warn("%s", prog->a_savefile);
+		} else {
+			warnx("%s: truncated savefile", prog->a_savefile);
+		}
 		return (-1);
 	}
 
 	if (memcmp(state.magic, "\x09SAV", 4) != 0) {
-		fprintf(stderr, "%s: Wrong savefile magic\n", prog->name);
+		warnx("wrong savefile magic");
 		return (-1);
 	}
 
 	if (state.version > HDR_VERSION) {
-		fprintf(stderr, "%s: Savefile format too new\n", prog->name);
+		warnx("savefile format too new");
 		return (-1);
 	} else if (state.version < HDR_VERSION) {
-		fprintf(stderr, "%s: Outdated savefile format\n", prog->name);
+		warnx("savefile format too old");
 		return (-1);
 	}
 
 	uint32_t state_crc = state.checksum;
 	state.checksum = 0;
-	uint32_t crc = UINT32_MAX;
-	for (uint32_t i = 0; i < sizeof(struct pci_save); i++) {
-		crc = crc32_step(crc, ((uint8_t *)&state)[i]);
-	}
-	crc ^= UINT32_MAX;
 
-	if (state_crc != crc) {
-		fprintf(stderr, "%s: Invalid savefile checksum\n", prog->name);
+	if (state_crc32(&state) != state_crc) {
+		warnx("invalid savefile checksum");
 		return (-1);
 	}
 
@@ -484,18 +469,17 @@ state_load(
 		(nyetpci_get_subvendor(pci, &subvendor) < 0) ||
 		(nyetpci_get_subdevice(pci, &subdevice) < 0)) {
 
+		warnx("could not read PCI IDs from device");
 		return (-1);
 	}
 
 	if (state.vendor != vendor || state.device != device) {
-		fprintf(stderr, "%s: Savefile PCI vendor/device do not match\n",
-			prog->name);
+		warnx("savefile PCI vendor/device do not match");
 		return (-1);
 	} else if (state.subvendor != subvendor ||
 		state.subdevice != subdevice) {
 
-		fprintf(stderr, "%s: Warning: Savefile PCI subvendor/subdevice "
-			"do not match\n", prog->name);
+		warnx("savefile PCI subvendor/subdevice do not match");
 	}
 
 	/* Parse the lists */
@@ -511,14 +495,7 @@ state_load(
 	}
 
 	/* dwords */
-	size_t end = 0;
-	if (prog->flag_ext) {
-		end = CFG_EXT_SZ;
-		LOG("Writing extended config space");
-	} else {
-		end = CFG_SZ;
-		LOG("Writing regular config space");
-	}
+	size_t end = prog->flag_ext ? CFG_EXT_SZ : CFG_SZ;
 
 	for (size_t i = 0; i < end; i += 4) {
 		if (!mask_get(state.config_mask, i / 4)) {
@@ -528,14 +505,12 @@ state_load(
 		uint32_t dw;
 		memcpy(&dw, state.config + i, sizeof(uint32_t));
 		if (nyetpci_cfg_write(pci, i, 4, &dw) < 0) {
-			fprintf(stderr, "%s: Could not write config space at "
-				"0x%zX\n", prog->name, i);
+			warnx("could not write config space at 0x%zX", i);
 		}
 	}
 
 	if (prog->flag_validate) {
 		int perfect = 1;
-		LOG("Validating the loaded config space");
 		for (size_t i = 0; i < end; i += 4) {
 			uint32_t dw_cfg,
 				 dw_pci;
@@ -545,16 +520,16 @@ state_load(
 			}
 
 			if (nyetpci_cfg_read(pci, i, 4, &dw_pci) < 0) {
-				fprintf(stderr, "%s: Could not read config "
-					"space at 0x%zX\n", prog->name, i);
+				warnx("could not read config space at 0x%zX",
+					i);
 				return (-1);
 			}
 
 			memcpy(&dw_cfg, state.config + i, sizeof(uint32_t));
 
 			if (dw_cfg != dw_pci) {
-				fprintf(stderr, "Dword at offset 0x%zX did "
-					"not stick! (save:0x%08X pci:0x%08X)\n",
+				fprintf(stderr, "Dword at offset 0x%zX did not "
+					"stick! (save:0x%08X pci:0x%08X)\n",
 					i, dw_cfg, dw_pci);
 				perfect = 0;
 			}
@@ -584,11 +559,11 @@ parse_prog_args(
 	)
 {
 	if (argc < 2) {
-		usage(prog->name, 0);
+		usage(0);
 	}
 
 	if (strcmp(argv[1], "-h") == 0) {
-		usage(prog->name, 1);
+		usage(1);
 	}
 
 	if (strcmp(argv[1], "save") == 0) {
@@ -596,8 +571,8 @@ parse_prog_args(
 	} else if (strcmp(argv[1], "load") == 0) {
 		prog->mode = MODE_LOAD;
 	} else {
-		fprintf(stderr, "%s: Invalid mode\n", prog->name);
-		usage(prog->name, 0);
+		warnx("invalid mode: %s", argv[1]);
+		usage(0);
 	}
 
 	optind = 2;
@@ -606,7 +581,7 @@ parse_prog_args(
 	while ((ch = getopt(argc, argv, "hved:n:y:")) != -1) {
 		switch (ch) {
 		case 'h':
-			usage(prog->name, 1);
+			usage(1);
 			break;
 
 		case 'v':
@@ -630,44 +605,38 @@ parse_prog_args(
 			break;
 
 		default:
-			usage(prog->name, 0);
+			usage(0);
 		}
 	}
 
 	if (optind >= argc) {
-		usage(prog->name, 0);
+		usage(0);
 	}
 
 	prog->a_savefile = argv[optind++];
 
 	if (prog->a_device == NULL) {
-		fprintf(stderr, "%s: Device not specified\n", prog->name);
-		usage(prog->name, 0);
+		warnx("device not specified");
+		usage(0);
 	}
 
 	if (optind != argc) {
-		fprintf(stderr, "%s: Trailing arguments after savefile\n",
-			prog->name);
-		usage(prog->name, 0);
+		warnx("trailing arguments after savefile");
+		usage(0);
 	}
 
 	/*
 	 * Validate arguments
 	 */
 
-	if (prog->a_savefile == NULL) {
-		fprintf(stderr, "%s: Savefile not specified\n",
-			prog->name);
-		usage(prog->name, 0);
-	} else if (prog->a_yeslist != NULL && prog->a_nolist != NULL) {
-		fprintf(stderr, "%s: Cannot use both yeslist and nolist\n",
-			prog->name);
-		usage(prog->name, 0);
+	if (prog->a_yeslist != NULL && prog->a_nolist != NULL) {
+		warnx("-y and -n are mutually exclusive");
+		usage(0);
 	}
 
 	/* Parse PCI selector */
 	if (nyetpci_parse_sel(prog->a_device, &pci->sel) < 0) {
-		fprintf(stderr, "%s: Invalid device selector\n", prog->name);
+		warnx("invalid device selector: %s", prog->a_device);
 		return (-1);
 	}
 
@@ -676,22 +645,19 @@ parse_prog_args(
 		if ((prog->yeslist = parse_csx(prog->a_yeslist,
 			&prog->yeslist_len)) == NULL) {
 
-			fprintf(stderr, "%s: Invalid yeslist string\n",
-				prog->name);
+			warnx("invalid -y list: %s", prog->a_yeslist);
 			return (-1);
 		}
 	}
 
 	for (size_t i = 0; i < prog->yeslist_len; i++) {
 		if (prog->yeslist[i] >= CFG_EXT_SZ) {
-			fprintf(stderr, "%s: Yeslist entry %zu overflows "
-					"extended config space\n",
-					prog->name, i);
+			warnx("-y offset 0x%X is outside extended config space",
+				prog->yeslist[i]);
 			return (-1);
 		} else if (prog->yeslist[i] >= CFG_SZ && !prog->flag_ext) {
-			fprintf(stderr, "%s Yeslist entry %zu is in extended "
-					"config space, yet -e was not passed\n",
-					prog->name, i);
+			warnx("-y offset 0x%X is in extended config space, "
+				"but -e was not passed", prog->yeslist[i]);
 			return (-1);
 		}
 	}
@@ -701,16 +667,15 @@ parse_prog_args(
 		if ((prog->nolist = parse_csx(prog->a_nolist,
 			&prog->nolist_len)) == NULL) {
 
-			fprintf(stderr, "%s: Invalid nolist string\n",
-				prog->name);
+			warnx("invalid -n list: %s", prog->a_nolist);
 			return (-1);
 		}
 	}
 
 	for (size_t i = 0; i < prog->nolist_len; i++) {
 		if (prog->nolist[i] >= CFG_EXT_SZ) {
-			fprintf(stderr, "%s: Nolist entry %zu overflows cfg\n",
-				prog->name, i);
+			warnx("-n offset 0x%X is outside extended config space",
+				prog->nolist[i]);
 			return (-1);
 		}
 	}
@@ -731,15 +696,12 @@ main(
 	struct prog_ctx prog = {0};
 	int ret = EXIT_FAILURE;
 
-	prog.name = argv[0];
-	prog.mode = MODE_INVALID;
-
 	if (parse_prog_args(&prog, &pci, argc, argv) < 0) {
 		goto exit;
 	}
 
 	if (nyetpci_init(&pci) < 0) {
-		perror("nyetpci_init()");
+		warnx("nyetpci_init failed");
 		goto exit;
 	}
 
@@ -752,8 +714,7 @@ main(
 			goto exit;
 		}
 	} else {
-		fprintf(stderr, "%s: Mode not set (This should not happen!)\n",
-			prog.name);
+		warnx("mode not set");
 		goto exit;
 	}
 

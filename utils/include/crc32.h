@@ -6,7 +6,7 @@
 #ifndef _CRC32_H
 #define _CRC32_H
 
-#include <stdio.h>
+#include <stdint.h>
 
 /*
  * Do one step of the slow sum algorithm
